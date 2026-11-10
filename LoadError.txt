@@ -1,0 +1,954 @@
+﻿🚨 راهنمای جامع خطاهای Ansible: از لود اولیه تا اجرای Playbook + دلایل و راه‌حل‌ها
+
+    ساختار هر خطا: پیام خطا → علت فنی → تشخیص → راه‌حل → پیشگیری
+
+📦 بخش ۱: خطاهای نصب و لود اولیه (Ansible اصلاً اجرا نمی‌شود)
+1.1 ansible: command not found
+
+علت: Ansible نصب نیست یا در $PATH نیست.
+تشخیص:
+bash
+
+which ansible
+python3 -c "import ansible; print(ansible.__version__)"
+pip3 show ansible ansible-core
+echo $PATH
+
+راه‌حل:
+bash
+
+# روش پیشنهادی: virtualenv
+python3 -m venv /opt/ansible-venv
+/opt/ansible-venv/bin/pip install ansible-core
+export PATH=/opt/ansible-venv/bin:$PATH
+
+# یا apt/dnf
+sudo apt install ansible-core       # Debian/Ubuntu
+sudo dnf install ansible-core       # RHEL/Rocky
+
+پیشگیری: نصب در venv، ثبت در ~/.bashrc، یا استفاده از pipx install ansible-core.
+1.2 ImportError: No module named ansible
+
+علت: پایتون اشتباه (system python vs venv)، نصب ناقص، یا PYTHONPATH مخدوش.
+تشخیص:
+bash
+
+head -1 $(which ansible)     # shebang → کدام python؟
+pip3 list | grep ansible
+python3 -c "import sys; print(sys.path)"
+
+راه‌حل:
+bash
+
+pip3 install --upgrade ansible-core
+# یا نصب مجدد در venv
+unset PYTHONPATH
+
+پیشگیری: venv جدا، پرهیز از pip install --user روی سیستم‌های shared.
+1.3 ModuleNotFoundError: No module named 'jinja2'
+
+علت: وابستگی ناقص یا نصب نیمه‌کاره.
+راه‌حل:
+bash
+
+pip3 install -r $(python3 -c "import ansible, os; print(os.path.dirname(ansible.__file__))")/../ansible_core*/requirements.txt
+# یا ساده‌تر:
+pip3 install --upgrade --force-reinstall ansible-core
+
+پیشگیری: استفاده از pip check برای بررسی سازگاری.
+1.4 ansible: error while loading shared libraries: libpython3.X.so.1.0: cannot open shared object file
+
+علت: کتابخانه Python حذف/جابجا شده یا نسخه اشتباه python.
+تشخیص:
+bash
+
+ldd $(which ansible)
+ls /usr/lib/x86_64-linux-gnu/libpython3*
+
+راه‌حل:
+bash
+
+sudo apt install --reinstall libpython3.10 python3.10
+sudo ldconfig
+
+1.5 ERROR! Unexpected Exception, this is probably a bug: (your error)
+
+علت: استثنای غیرمنتظره در core.
+تشخیص:
+bash
+
+ansible --version
+ansible-playbook -vvv playbook.yml
+ANSIBLE_DEBUG=1 ansible-playbook playbook.yml
+
+راه‌حل: گزارش به issues با ansible-playbook -vvvv؛ در موقت:
+bash
+
+pip3 install --upgrade ansible-core
+
+1.6 command not found: ansible-playbook (ولی ansible هست)
+
+علت: نصب ansible-core بدون ansible bundle، یا PATH ناقص.
+راه‌حل:
+bash
+
+ls /usr/bin/ansible*
+pip3 install ansible  # meta-package
+
+1.7 ERROR! 'ansible' is not a valid attribute for a Play
+
+علت: YAML playbook فاقد ساختار list of dicts است یا کلید اشتباه.
+تشخیص:
+yaml
+
+# ❌ اشتباه
+ansible: ...
+# ✅ درست
+- hosts: all
+  tasks: [...]
+
+راه‌حل: ansible-lint بزن؛ yamllint playbook.yml.
+⚙️ بخش ۲: خطاهای ansible.cfg
+2.1 [WARNING]: Config file (...) could not be found
+
+علت: $ANSIBLE_CONFIG به مسیر ناموجود اشاره می‌کند.
+تشخیص: echo $ANSIBLE_CONFIG ، ansible-config view
+راه‌حل: unset ANSIBLE_CONFIG یا مسیر صحیح.
+2.2 [WARNING]: Ansible is being run in a world writable directory
+
+علت: اجرا از دایرکتوری که world-writable است (مثلاً /tmp)، Ansible فایل ansible.cfg محلی را نادیده می‌گیرد.
+راه‌حل:
+bash
+
+chmod o-w /path/to/project
+# یا انتقال به مسیر امن
+
+امنیتی: این هشدار جدی است — مهاجم می‌تواند ansible.cfg مخرب قرار دهد.
+2.3 [WARNING]: provided hosts list is empty, only localhost is available
+
+علت: inventory خالی، مسیر اشتباه، یا فایل parse نشده.
+تشخیص:
+bash
+
+ansible-inventory --list
+ansible-inventory --graph
+ansible all --list-hosts
+
+راه‌حل:
+
+    بررسی inventory = در ansible.cfg
+
+    ansible -i /path/to/inventory all --list-hosts
+
+    اگر inventory دایرکتوری است: ls -la و بررسی پسوندها
+
+2.4 ERROR! Invalid settings supplied for ...
+
+علت: کلید ناشناخته یا مقدار نامعتبر در ansible.cfg.
+تشخیص:
+bash
+
+ansible-config dump --only-changed
+ansible-config dump 2>&1 | grep -i invalid
+
+راه‌حل: مراجعه به ansible-config list برای دیدن نام دقیق کلیدها و بخش ([defaults], [ssh_connection], …).
+2.5 [WARNING]: * Failed to parse ... with ini plugin: ...
+
+علت: inventory INI با ساختار اشتباه (مثلاً [group:vars] بدون =).
+تشخیص: ansible-inventory -i file.ini --list
+راه‌حل: اصلاح INI؛ یا inventory_unparsed_failed = True برای fail سریع.
+2.6 [WARNING]: Invalid characters in ...
+
+علت: کاراکتر غیرمجاز در نام گروه/میزبان یا مسیر.
+راه‌حل: فقط [a-zA-Z0-9_-.] (بدون فاصله، :, /).
+2.7 Deprecation warnings ... ansible.cfg ...
+
+علت: کلید در نسخه جدید منسوخ شده (use_ssh_args, accelerate, …).
+راه‌حل: ansible-config list | grep -B1 deprecated → انتقال به کلید جدید.
+2.8 [WARNING]: log file at ... is not writeable and we cannot create it, aborting
+
+علت: log_path با مجوز نادرست.
+راه‌حل:
+bash
+
+sudo touch /var/log/ansible.log
+sudo chown ansible:adm /var/log/ansible.log
+sudo chmod 640 /var/log/ansible.log
+
+🌐 بخش ۳: خطاهای Inventory
+3.1 Unable to parse /etc/ansible/hosts as an inventory source
+
+علت: فایل خالی، YAML نامعتبر، پسوند ناشناخته، یا permission.
+تشخیص:
+bash
+
+file /etc/ansible/hosts
+python3 -c "import yaml; print(yaml.safe_load(open('/etc/ansible/hosts')))"
+ansible-inventory -i /etc/ansible/hosts --list -vvv
+
+راه‌حل: اصلاح ساختار؛ افزودن پسوند صحیح؛ chmod 644.
+3.2 Attempted to read ... as JSON
+
+علت: inventory با پسوند .json ولی محتوای YAML/INI.
+راه‌حل: نام‌گذاری درست یا enable_plugins صریح.
+3.3 [WARNING]: Could not match supplied host pattern, ignoring: <pattern>
+
+علت: پترن در hosts: وجود ندارد.
+تشخیص:
+bash
+
+ansible-inventory --graph
+ansible-inventory --host <name>
+
+راه‌حل: اصلاح نام؛ all، الگو web*، یا ansible-inventory --graph برای دیباگ.
+3.4 [WARNING]: Unable to parse ... as an inventory source + Ignoring ...
+
+علت: پلاگین script یا auto روی فایل اجرایی نامعتبر.
+راه‌حل: enable_plugins = yaml, ini یا افزودن shebang صحیح به اسکریپت.
+3.5 Invalid data from file, expected dictionary and got ...
+
+علت: ساختار YAML inventory با تودرتویی اشتباه.
+راه‌حل: نمونه صحیح YAML:
+yaml
+
+all:
+  children:
+    web:
+      hosts:
+        web01: {}
+
+3.6 Could not find the requested inventory source ...
+
+علت: مسیر در -i وجود ندارد.
+راه‌حل: ls -la روی مسیر؛ مسیر مطلق ده.
+3.7 Cannot parse ... unhashable type 'dict'
+
+علت: دیکشنری داخل hosts: یا children: در محل غیرمجاز.
+راه‌حل: بررسی نمونه YAML و ساختار children/hosts.
+3.8 [WARNING]: * Failed to parse ... with yaml plugin: YAML inventory has invalid structure, it should be a dictionary
+
+علت: YAML inventory با root لیست.
+راه‌حل: root باید dict باشد با all یا نام گروه.
+3.9 Inventory hostname ... has invalid characters
+
+علت: کاراکتر غیرمجاز در نام.
+راه‌حل: [a-zA-Z0-9_.-] فقط.
+3.10 hosts variable has no 'hosts' key (برای پلاگین داینامیک)
+
+علت: پلاگین inventory داینامیک (aws_ec2, azure_rm, ...) تنظیمات ناقص/plugin نصب نیست.
+راه‌حل:
+bash
+
+ansible-galaxy collection install amazon.aws
+ansible-inventory -i inventory_aws_ec2.yml --graph -vvv
+
+بررسی plugin: و credentialها.
+🔌 بخش ۴: خطاهای اتصال SSH
+4.1 UNREACHABLE! => {"msg": "Failed to connect to the host via ssh: ssh: connect to host ... port 22: Connection refused"}
+
+علت: سرویس SSH خاموش، فایروال، پورت اشتباه.
+تشخیص:
+bash
+
+nc -zv host 22
+ssh -vvv user@host
+ansible host -m ping -vvv
+
+راه‌حل: روشن کردن sshd؛ remote_port صحیح؛ فایروال.
+4.2 Permission denied (publickey,password)
+
+علت: کلید اشتباه، کاربر اشتباه، authorized_keys.
+تشخیص:
+bash
+
+ssh -i ~/.ssh/key -o IdentitiesOnly=yes user@host
+ssh-add -l
+
+راه‌حل:
+yaml
+
+# در inventory
+ansible_host=...
+ansible_user=...
+ansible_ssh_private_key_file=~/.ssh/id_rsa
+
+یا ssh-agent + ssh-add.
+4.3 Host key verification failed
+
+علت: fingerprint تغییر کرده / نبود در known_hosts (با host_key_checking=True).
+تشخیص:
+bash
+
+ssh-keygen -F hostname
+ssh-keyscan -t ed25519 host
+
+راه‌حل:
+bash
+
+ssh-keygen -R host
+ssh-keyscan -H host >> ~/.ssh/known_hosts
+
+امنیتی: هرگز host_key_checking=False در prod — از CA امضاکننده استفاده کن.
+4.4 SSH Error: data could not be sent to remote host
+
+علت: timeout، قطعی شبکه، pipelining با requiretty، ControlPersist سوکت خراب.
+تشخیص:
+bash
+
+ls -la ~/.ansible/cp/
+ssh -o ControlPath=... user@host
+
+راه‌حل:
+bash
+
+rm -rf ~/.ansible/cp/*
+ansible-playbook --ssh-extra-args="-o ConnectTimeout=30"
+
+یا pipelining=False موقتاً.
+4.5 Missing sudo password
+
+علت: become: true ولی become_ask_pass یا NOPASSWD تنظیم نشده.
+راه‌حل:
+
+    ansible-playbook -K (پرسیدن رمز)
+
+    یا در sudoers:
+
+text
+
+ansible ALL=(ALL) NOPASSWD: ALL
+Defaults:ansible !requiretty
+
+    یا become_ask_pass = True در ansible.cfg.
+
+4.6 sudo: sorry, you must have a tty to run sudo
+
+علت: requiretty فعال + pipelining.
+راه‌حل:
+text
+
+# /etc/sudoers
+Defaults !requiretty
+Defaults:ansible !requiretty
+
+یا pipelining = False (کاهش سرعت).
+4.7 Authentication or permission failure. In some cases, you may have been able to authenticate and did not have permissions on the target directory
+
+علت: کاربر SSH به ~/.ansible/tmp دسترسی ندارد.
+راه‌حل:
+yaml
+
+# inventory
+ansible_remote_tmp=/tmp/.ansible-${USER}/tmp
+
+یا در ansible.cfg: remote_tmp = /tmp/.ansible-${USER}/tmp.
+4.8 to use the 'ssh' connection type with passwords or pkcs11-provider, you must install the sshpass program
+
+علت: اتصال با رمز SSH بدون sshpass.
+راه‌حل: sudo apt install sshpass (توصیه نمی‌شود) — بهتر: از کلید استفاده کن.
+4.9 Timeout (12s) waiting for privilege escalation prompt
+
+علت: sudo منتظر رمز است ولی become_ask_pass تنظیم نشده، یا sudoers کند است (LDAP).
+راه‌حل:
+
+    -K یا become_ask_pass=True
+
+    افزایش timeout = 30
+
+    sudo بدون NOPASSWD/pam ساده
+
+4.10 Control socket ... already exists, disabling multiplexing
+
+علت: سوکت قدیمی در ~/.ansible/cp/.
+راه‌حل:
+bash
+
+rm -rf ~/.ansible/cp/*
+
+4.11 Cannot use pipelining with sudo / pipelining errors
+
+علت: requiretty یا sudo در حالت -S بدون TTY.
+راه‌حل: Defaults !requiretty + pipelining=True یا pipelining=False.
+4.12 ssh: Could not resolve hostname <host>
+
+علت: DNS//etc/hosts روی control node.
+راه‌حل:
+bash
+
+getent hosts <host>
+ping -c1 <host>
+
+یا ansible_host= با IP در inventory.
+4.13 Connection reset by peer
+
+علت: فایروال، IDS/IPS، sshd حداکثر اتصال، MaxStartups.
+راه‌حل: افزایش MaxStartups در sshd_config؛ کاهش forks؛ بررسی fail2ban.
+🐍 بخش ۵: خطاهای Python Interpreter
+5.1 The module failed to execute correctly, you probably need to set the interpreter
+
+پیام کامل: /usr/bin/python: not found
+علت: هاست هدف python ندارد یا مسیرش /usr/bin/python3 است.
+راه‌حل:
+ini
+
+# ansible.cfg
+interpreter_python = /usr/bin/python3
+
+# یا در inventory
+ansible_python_interpreter=/usr/bin/python3
+
+یا ansible_python_interpreter=auto_silent.
+5.2 MODULE FAILURE + SyntaxError
+
+علت: نسخه Python روی هدف قدیمی (2.7) و ماژول نیاز به 3.x دارد.
+راه‌حل: ارتقاء Python؛ یا ماژول سازگار؛ ansible_python_interpreter=/usr/bin/python3.10.
+5.3 Could not find a suitable Python interpreter
+
+علت: هیچ‌کدام از مفسرهای fallback موجود نیست.
+راه‌حل:
+yaml
+
+# در inventory vars
+ansible_python_interpreter: /usr/local/bin/python3.11
+
+برای Alpine: apk add python3.
+برای RHEL: dnf install python3.
+5.4 python3: not found روی Alpine
+
+علت: Alpine به‌طور پیش‌فرض پایتون ندارد.
+راه‌حل:
+yaml
+
+- raw: apk add --no-cache python3
+  when: ansible_os_family == "Alpine"
+
+در playbook اولیه (gather_facts: false).
+5.5 ImportError: No module named 'selinux'
+
+علت: روی هدف libselinux-python نصب نیست.
+راه‌حل:
+bash
+
+sudo dnf install python3-libselinux   # RHEL
+sudo apt install python3-selinux      # Debian
+
+5.6 ImportError: No module named 'apt' / 'yum' / 'dnf'
+
+علت: وابستگی ماژول (pycurl, libvirt-python, …) روی هدف نیست.
+راه‌حل:
+bash
+
+sudo apt install python3-apt
+sudo dnf install python3-dnf
+
+📦 بخش ۶: خطاهای ماژول و Plugin
+6.1 The module <name> was not found in configured module paths
+
+علت: ماژول core نیست، collection نصب نیست.
+تشخیص:
+bash
+
+ansible-doc -l | grep <module>
+ansible-galaxy collection list
+
+راه‌حل:
+bash
+
+ansible-galaxy collection install community.general
+# در playbook:
+collections:
+  - community.general
+
+یا FQCN: community.general.<module>.
+6.2 ERROR! couldn't resolve module/action 'xxx'
+
+علت: FQCN اشتباه یا collection نیست.
+راه‌حل: ansible-doc -l | grep <name>؛ نصب collection.
+6.3 Could not find or access '/path/to/file'
+
+علت: src در copy/template/script وجود ندارد یا نسبی اشتباه.
+تشخیص:
+bash
+
+ls roles/<role>/files/
+ls roles/<role>/templates/
+
+راه‌حل: مسیر نسبی از playbook_dir/role/files؛ -vvv برای دیدن مسیر resolve.
+6.4 MODULE FAILURE\nSee stdout/stderr for the exact error
+
+علت: خطای اجرای ماژول (permission, syntax, dependency).
+تشخیص:
+bash
+
+ansible host -m <module> -a '...' -vvv
+
+یا با -e ansible_keep_remote_files=true فایل temp روی هدف نگه داشته می‌شود.
+6.5 Traceback ... No module named 'requests'
+
+علت: ماژول (uri, get_url, ...) نیاز به requests روی هدف دارد.
+راه‌حل:
+bash
+
+sudo apt install python3-requests
+
+یا pip3 install requests روی هدف.
+6.6 TypeError: ... unexpected keyword argument
+
+علت: نسخه module قدیمی با playbook جدید.
+راه‌حل: ansible-galaxy collection install --upgrade <collection>؛ ansible-doc <module>.
+6.7 Failed to find required executable ...
+
+علت: باینری موردنیاز روی هدف نیست (git, rsync, systemctl, ...).
+راه‌حل: نصب باینری؛ یا state skip.
+6.8 The task includes an option with an undefined variable
+
+علت: متغیر تعریف‌نشده.
+تشخیص:
+bash
+
+ansible-playbook --syntax-check
+ansible-playbook -vvv --start-at-task="..."
+
+راه‌حل: default() در Jinja؛ vars_prompt؛ set_fact.
+6.9 'dict object' has no attribute '...'
+
+علت: کلید در dict نیست (typo یا fact نبود).
+راه‌حل:
+yaml
+
+"{{ my_dict.get('key', 'default') }}"
+
+و -vvv برای دیدن مقدار.
+6.10 Recursive loop detected in template string
+
+علت: self-reference در Jinja.
+راه‌حل: تغییر نام متغیر یا استفاده از set_fact.
+🔐 بخش ۷: خطاهای Vault
+7.1 Attempting to decrypt but no vault secrets found
+
+علت: فایل vault هست ولی رمز داده نشده.
+راه‌حل:
+bash
+
+ansible-playbook --vault-password-file=~/.vault_pass
+# یا
+export ANSIBLE_VAULT_PASSWORD_FILE=~/.vault_pass
+# یا
+ansible-playbook --ask-vault-pass
+
+7.2 Decryption failed (no vault secrets were found that could decrypt)
+
+علت: رمز اشتباه / vault-id نادرست.
+راه‌حل: تأیید رمز؛ --vault-id صحیح.
+7.3 ERROR! A vault password must be specified to decrypt ...
+
+علت: ansible-vault بدون رمز اجرا شده.
+راه‌حل: --ask-vault-pass یا --vault-password-file.
+7.4 Vault format unhexlify error: Non-hexadecimal digit found
+
+علت: فایل vault با فرمت قدیمی/خراب.
+راه‌حل: بازسازی با ansible-vault encrypt --output newfile oldfile.
+7.5 [WARNING]: The vault password file ... was not found
+
+علت: مسیر رمز اشتباه.
+راه‌حل: ls -la؛ مسیر مطلق.
+7.6 ERROR! Decryption failed on ...
+
+علت: vault-id mismatch در چند-ID.
+راه‌حل: ansible-vault view --vault-id prod@prompt file.
+🔨 بخش ۸: خطاهای Privilege Escalation
+8.1 Missing sudo password
+
+→ بالا (4.5).
+8.2 sudo: a password is required
+
+علت: NOPASSWD نیست و become_ask_pass=False.
+راه‌حل: -K؛ become_ask_pass=True؛ NOPASSWD محدود.
+8.3 Sorry, user ansible is not allowed to execute '/bin/bash' as root
+
+علت: sudoers محدود.
+راه‌حل:
+text
+
+ansible ALL=(ALL) NOPASSWD: /bin/bash, /usr/bin/apt, /usr/bin/systemctl
+
+یا نقش sudoers.
+8.4 Incorrect sudo password
+
+راه‌حل: تأیید رمز؛ sudo -k سپس.
+8.5 become_user: postgres + peer authentication failed
+
+علت: PostgreSQL peer auth برای کاربر سیستم.
+راه‌حل: become_user: postgres روی هاست + اجرای psql.
+8.6 pbrun: command not found (اگر become_method=pbrun)
+
+راه‌حل: become_method = sudo.
+📝 بخش ۹: خطاهای YAML و Playbook
+9.1 yaml.scanner.ScannerError: mapping values are not allowed here
+
+علت: : بدون فاصله یا indent اشتباه.
+راه‌حل: yamllint؛ ansible-playbook --syntax-check.
+9.2 ERROR! Syntax Error while loading YAML
+
+علت: tab به‌جای space؛ پارامتر گمشده؛ string بدون quote.
+راه‌حل: yamllint -d relaxed؛ ansible-lint.
+9.3 ERROR! couldn't resolve module/action '<module>'
+
+→ بالا (6.2).
+9.4 ERROR! 'tasks' is not a valid attribute for a Play
+
+علت: playbook با tasks: در محل اشتباه یا typo.
+راه‌حل: ansible-playbook --syntax-check.
+9.5 ERROR! Duplicate dict key
+
+علت: YAML کلید تکراری در dict.
+راه‌حل: پاک‌سازی؛ استفاده از combine.
+9.6 The offending line appears to be: ...
+
+راه‌حل: پیام دقیقاً خطا را نشان می‌دهد؛ --syntax-check و -vvv.
+9.7 ERROR! Unable to retrieve file contents: Could not find or access ...
+
+→ بالا (6.3).
+9.8 ERROR! Unexpected parameter type in action: <class 'dict'>
+
+علت: آرگومان ماژول به‌جای dict، string.
+راه‌حل: بررسی YAML indentation.
+9.9 ERROR! Vault format unhexlify ... (وقتی vault در playbook)
+
+→ بالا (7.4).
+9.10 ERROR! 'include_tasks' is not a valid attribute for a Block
+
+علت: استفاده اشتباه از include_tasks در جایی که block مجاز است (نه؟)
+راه‌حل: با ansible-lint؛ انتقال به task.
+🕵️ بخش ۱۰: خطاهای Fact Gathering
+10.1 Timeout (12s) waiting for privilege escalation prompt
+
+→ بالا (4.9).
+10.2 FAILED! => {"msg": "The conditional check '...' failed. The error was: error while evaluating conditional: 'ansible_distribution' is undefined"}
+
+علت: fact جمع نشده (gather_facts: false) ولی استفاده می‌شود.
+راه‌حل: gather_facts: true؛ یا setup: task.
+10.3 MODULE FAILURE در setup
+
+علت: Python هدف قدیمی/ناقص.
+راه‌حل:
+bash
+
+ansible host -m setup -vvv
+
+-e ansible_python_interpreter=/usr/bin/python3.
+10.4 Timeout when gathering facts / failed: [host] (item=...)
+
+راه‌حل:
+ini
+
+gather_timeout = 30
+
+و gather_subset = min برای سرعت.
+10.5 Could not find a module 'setup'
+
+علت: عجیب — collection خراب.
+راه‌حل: pip3 install --force-reinstall ansible-core.
+10.6 [WARNING]: Host ... is unreachable, fact gathering skipped
+
+علت: اتصال برقرار نشد.
+→ بالا (4).
+🖥️ بخش ۱۱: خطاهای WinRM (ویندوز)
+11.1 winrm or requests is not installed: No module named 'winrm'
+
+راه‌حل:
+bash
+
+pip3 install pywinrm requests
+
+11.2 ssl: CERTIFICATE_VERIFY_FAILED
+
+علت: گواهی self-signed.
+راه‌حل:
+yaml
+
+# inventory
+ansible_winrm_server_cert_validation=ignore
+
+(در prod: CA معتبر نصب کن)
+11.3 winrm connection error: the specified credentials were rejected by the server
+
+علت: نام کاربری/رمز اشتباه؛ NTLM/Kerberos.
+راه‌حل: ansible_user, ansible_password, ansible_winrm_transport=ntlm|kerberos.
+11.4 kerberos: Cannot contact any KDC for realm 'EXAMPLE.COM'
+
+علت: /etc/krb5.conf غلط؛ DNS.
+راه‌حل:
+bash
+
+kinit user@EXAMPLE.COM
+klist
+
+نصب python3-kerberos و krb5-workstation.
+11.5 HTTP Error 401: Unauthorized
+
+علت: WinRM با Basic Auth غیرفعال، یا هدر Host.
+راه‌حل:
+powershell
+
+winrm set winrm/config/service/auth '@{Basic="true"}'
+winrm set winrm/config/service '@{AllowUnencrypted="false"}'
+
+استفاده از HTTPS.
+11.6 WinRM operation timeout
+
+راه‌حل:
+yaml
+
+ansible_winrm_operation_timeout_sec: 60
+ansible_winrm_read_timeout_sec: 70
+
+11.7 Authentication method not supported
+
+علت: transport=plaintext بدون HTTPS.
+راه‌حل: ansible_winrm_transport=ntlm یا kerberos؛ ansible_winrm_scheme=https.
+11.8 pywinrm is not installed (نسخه قدیمی)
+
+→ نصب.
+🧩 بخش ۱۲: خطاهای Collections و Roles
+12.1 ERROR! Unable to find collection ...
+
+راه‌حل:
+bash
+
+ansible-galaxy collection install -r requirements.yml
+ansible-galaxy collection install <namespace>.<name>
+
+12.2 ERROR! 'role X' was not found
+
+راه‌حل:
+bash
+
+ansible-galaxy role install <name>
+ansible-galaxy role install -r roles/requirements.yml
+
+بررسی roles_path.
+12.3 ERROR! conflicting action statements
+
+علت: دو action در یک task (مثلاً shell و copy).
+راه‌حل: تقسیم به دو task.
+12.4 ERROR! tag name 'xxx' is not a valid tag
+
+علت: کاراکتر غیرمجاز.
+راه‌حل: [a-zA-Z0-9_-].
+12.5 ERROR! couldn't resolve module/action 'copy'
+
+علت: جمع core ناقص.
+راه‌حل: pip3 install --force-reinstall ansible-core.
+⏱️ بخش ۱۳: خطاهای Timeout و Network
+13.1 Timeout (12s) waiting for privilege escalation prompt
+
+→ بالا.
+13.2 The full traceback is: ... Traceback ... requests.exceptions.ConnectTimeout
+
+علت: ماژول uri/get_url بدون response.
+راه‌حل:
+yaml
+
+- uri:
+    url: ...
+    timeout: 60
+
+13.3 Failed to connect to the host via ssh: ssh: connect to host ... port 22: Connection timed out
+
+→ بالا (4.1).
+13.4 Connection was closed before we received a valid message
+
+علت: ControlPersist سوکت خراب.
+راه‌حل: rm -rf ~/.ansible/cp/*.
+💾 بخش ۱۴: خطاهای فایل و دسترسی
+14.1 Permission denied در ~/.ansible/tmp
+
+→ بالا (4.7).
+14.2 Destination directory /etc/nginx does not exist
+
+علت: والد وجود ندارد.
+راه‌حل:
+yaml
+
+- file: path=/etc/nginx state=directory
+
+یا copy با dest مستقیم.
+14.3 Destination not writable
+
+علت: کاربر هدف دسترسی ندارد.
+راه‌حل: become: true.
+14.4 mkdir: cannot create directory
+
+علت: SELinux/AppArmor مانع.
+راه‌حل:
+yaml
+
+- seboolean: name=httpd_can_network_connect state=yes persistent=yes
+- sefcontext: target='/var/www' setype=httpd_sys_content_t
+
+🚦 بخش ۱۵: خطاهای منطق Playbook
+15.1 [ERROR]: Task failed: ... / The conditional check '...' failed
+
+علت: when، assert، یا fail اجرا شده.
+راه‌حل: -vvv؛ بازبینی شرط؛ ignore_errors فقط اگر منطقی.
+15.2 The task includes an option with an undefined variable. The error was: 'xxx' is undefined
+
+راه‌حل:
+yaml
+
+"{{ xxx | default('fallback') }}"
+
+15.3 Duplicate options for module
+
+راه‌حل: پاک‌سازی YAML.
+15.4 'NoneType' object has no attribute '...'
+
+راه‌حل: default({}) یا بررسی when.
+15.5 Host ... failed to be reached
+
+راه‌حل: serial: 1؛ ignore_unreachable: true (با احتیاط).
+🧯 بخش ۱۶: خطاهای Handler
+16.1 ERROR! The requested handler 'restart xxx' was not found in either the main handlers list nor in the listening handlers list
+
+علت: notify: نام handler موجود نیست.
+راه‌حل: تعریف handler در handlers/main.yml یا handlers: در playbook؛ name دقیق.
+16.2 Handler ... defined but not notified
+
+علت: نام notify متفاوت است.
+راه‌حل: ansible-playbook --list-tasks + --list-tags.
+🌍 بخش ۱۷: خطاهای Execution Environment / Navigator
+17.1 Error: cannot connect to the Docker daemon
+
+راه‌حل:
+bash
+
+sudo systemctl start docker
+sudo usermod -aG docker $USER
+
+17.2 ERROR! Pulling image failed (نصب execution environment)
+
+راه‌حل: بررسی network/registry؛ podman login.
+17.3 ansible-navigator: command not found
+
+راه‌حل: pip3 install ansible-navigator.
+17.4 EE image not found / ansible-builder not found
+
+راه‌حل: pip3 install ansible-builder؛ ساخت execution-environment.yml با ansible-builder build.
+📊 بخش ۱۸: خطاهای Callback/Output
+18.1 callback plugin 'xxx' is not whitelisted
+
+راه‌حل:
+ini
+
+[defaults]
+callbacks_enabled = xxx
+# یا در قدیمی‌ها:
+callback_whitelist = xxx
+
+18.2 Callback plugin failed
+
+راه‌حل: دیباگ؛ پاک‌سازی callback سفارشی؛ ANSIBLE_DEBUG=1.
+🔍 بخش ۱۹: دستورهای تشخیص سریع
+bash
+
+# نسخه و کانفیگ مؤثر
+ansible --version
+ansible-config dump --only-changed
+ansible-config view
+
+# inventory
+ansible-inventory --list
+ansible-inventory --graph
+ansible-inventory --host <name> -vvv
+
+# اتصال پایه
+ansible all -m ping -vvv
+ansible host -m setup -vvv
+
+# playbook
+ansible-playbook playbook.yml --syntax-check
+ansible-playbook playbook.yml --list-tasks
+ansible-playbook playbook.yml --list-hosts
+ansible-playbook playbook.yml -vvv --check
+ansible-playbook playbook.yml -vvvv --start-at-task="problem"
+
+# collections
+ansible-galaxy collection list
+ansible-doc -l
+ansible-doc <module>
+
+# لاگ
+ANSIBLE_DEBUG=1 ansible-playbook ...
+tail -f /var/log/ansible.log
+
+🎯 بخش ۲۰: جدول سریع خطاهای پرتکرار → راه‌حل
+خطا	علت ۹۰٪ موارد	راه‌حل
+UNREACHABLE!	SSH/firewall	ssh -vvv مستقیم
+Permission denied (publickey)	کلید/کاربر	ansible_ssh_private_key_file
+Missing sudo password	NOPASSWD	-K یا sudoers
+Module not found	collection نصب نیست	ansible-galaxy collection install
+python not found	مفسر	ansible_python_interpreter
+Host key verification failed	known_hosts	ssh-keyscan / CA
+undefined variable	typo/scope	-vvv + default()
+Task failed (conditional)	منطق	-vvv
+Vault decrypt	رمز	--vault-password-file
+world writable dir	cwd	انتقال به مسیر امن
+config not found	env	unset ANSIBLE_CONFIG
+timeout waiting for prompt	sudo	-K/!requiretty
+Control socket stale	cp dir	rm -rf ~/.ansible/cp/*
+winrm not installed	pywinrm	pip install pywinrm
+cert verify failed	self-signed	server_cert_validation=ignore (فقط dev)
+🧪 بخش ۲۱: چک‌لیست تشخیص ترتیبی
+
+اگر Ansible کار نمی‌کند، به این ترتیب بررسی کن:
+
+    نصب و PATH → which ansible; ansible --version
+
+    پایتون و import → python3 -c "import ansible"
+
+    کانفیگ → ansible-config dump --only-changed (خطاها را بخوان)
+
+    Inventory → ansible-inventory --list
+
+    اتصال → ansible all -m ping -vvv
+
+    Python روی هدف → ansible all -m setup -vvv
+
+    Playbook syntax → ansible-playbook --syntax-check
+
+    اجرای dry-run → ansible-playbook --check
+
+    اجرای واقعی با دیباگ → -vvv
+
+    لاگ‌ها → ANSIBLE_DEBUG=1, log_path
+
+🛡️ بخش ۲۲: پیشگیری و بهترین شیوه‌ها
+
+    ansible-lint و yamllint در CI
+
+    --syntax-check قبل از هر اجرا
+
+    --check روی محیط staging
+
+    venv اختصاصی برای Ansible
+
+    pin کردن نسخه collection/role (requirements.yml + lock)
+
+    لاگ مرکزی با SIEM
+
+    تست اتصال با ansible all -m ping قبل از playbook سنگین
+
+    serial برای اجرای cluster
+
+    no_log: true روی task حساس
+
+    git + code review برای هر تغییر config
+
+    host_key_checking=True همیشه در production
+
+    pipelining=True با !requiretty
+
+    CA امضای SSH برای scale
+
+    پایش /var/log/ansible.log با alert روی خطاها

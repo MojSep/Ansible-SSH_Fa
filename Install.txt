@@ -1,0 +1,1356 @@
+﻿🛠️ راهنمای جامع نصب Ansible در شرایط تحریم، اینترنت محدود، و محیط‌های امن/آفلاین
+
+    این راهنما تمام سناریوها را پوشش می‌دهد: نصب آنلاین، نصب از طریق mirrorهای داخلی، نصب کاملاً آفلاین (air-gapped)، و توصیه‌های امنیتی. با ذکر تأثیر تحریم‌ها بر هر مسیر.
+
+🗺️ نقشه راه تصمیم‌گیری
+text
+
+                        ┌─────────────────────────────┐
+                        │  آیا سرور به اینترنت وصل است؟ │
+                        └──────────────┬──────────────┘
+                                       │
+              ┌────────────────────────┼────────────────────────┐
+              │                        │                        │
+         ✅ کامل                    ⚠️ محدود               ❌ قطع کامل
+              │                        │                        │
+     ┌────────┴────────┐       ┌───────┴───────┐        ┌───────┴───────┐
+     │ pip / pipx      │       │ mirror داخلی  │        │  Offline Bundle│
+     │ apt / dnf       │       │ proxy / VPN   │        │  Air-gap       │
+     │ container / EE  │       │ mirror خارجی │        │  ISO/Mirror    │
+     └─────────────────┘       └───────────────┘        └────────────────┘
+              │                        │                        │
+              └────────────┬───────────┴────────────────────────┘
+                           │
+                    ┌──────┴──────┐
+                    │  امن‌سازی:  │
+                    │ • GPG/hash  │
+                    │ • venv      │
+                    │ • non-root  │
+                    │ • pin ver   │
+                    └─────────────┘
+
+🔴 پیش‌نیازهای عمومی (همه روش‌ها)
+نیازمندی‌های سیستمی
+مورد	حداقل	توصیه Production
+OS	RHEL 8 / Ubuntu 20.04 / Debian 11	RHEL 9 / Ubuntu 22.04+ / Debian 12
+Python (control node)	3.9	3.11 یا 3.12
+RAM	512 MB	2 GB+
+CPU	1 core	2+ core
+Disk	500 MB	5 GB+ (برای collections/cache)
+پایتون: چک اولیه
+bash
+
+python3 --version        # باید >= 3.9
+python3 -c "import ssl; print(ssl.OPENSSL_VERSION)"
+python3 -c "import venv; print('venv OK')"
+
+اگر venv نبود:
+bash
+
+# Debian/Ubuntu
+sudo apt install -y python3-venv python3-pip
+
+# RHEL 8/9
+sudo dnf install -y python3 python3-pip python3-venv
+
+🌐 بخش ۱: نصب آنلاین (با اینترنت)
+۱.۱ روش پیشنهادی: pipx (ایزوله، غیر‌روت، تمیز)
+چرا؟
+
+    هر ابزار در venv اختصاصی خودش
+
+    بدون تداخل با system python
+
+    بدون sudo برای اجرا
+
+    به‌روزرسانی جدا
+
+نصب pipx
+bash
+
+# Debian/Ubuntu
+sudo apt install -y pipx
+pipx ensurepath
+
+# RHEL/Rocky
+sudo dnf install -y pipx
+pipx ensurepath
+
+# یا مستقیم از pip
+python3 -m pip install --user pipx
+python3 -m pipx ensurepath
+
+نصب Ansible
+bash
+
+# ansible-core (سبک، بدون collectionها)
+pipx install ansible-core
+
+# ansible (bundle با ~۱۰۰ collection پرکاربرد)
+pipx install ansible
+
+# نسخه مشخص
+pipx install 'ansible-core==2.17.6'
+
+# با Python خاص
+pipx install --python python3.11 ansible-core
+
+بررسی
+bash
+
+pipx list
+ansible --version
+ansible-core --version 2>/dev/null || ansible --version
+
+ارتقاء و مدیریت
+bash
+
+pipx upgrade ansible-core
+pipx upgrade-all
+pipx uninstall ansible-core
+pipx reinstall ansible-core
+
+۱.۲ روش venv (توصیه‌شده برای Production)
+چرا؟
+
+    کنترل کامل روی نسخه‌ها
+
+    قابل انتقال بین سرورها
+
+    آسان برای pin کردن
+
+نصب
+bash
+
+# 1. ساخت venv اختصاصی
+sudo mkdir -p /opt/ansible-venv
+sudo chown $(whoami):$(whoami) /opt/ansible-venv
+
+python3 -m venv /opt/ansible-venv
+source /opt/ansible-venv/bin/activate
+
+# 2. ارتقاء pip/setuptools/wheel
+pip install --upgrade pip setuptools wheel
+
+# 3. نصب Ansible
+pip install 'ansible-core==2.17.6'
+
+# یا bundle کامل
+pip install 'ansible==10.5.0'
+
+ساخت wrapper برای دسترسی سراسری
+bash
+
+sudo tee /usr/local/bin/ansible <<'EOF'
+#!/bin/bash
+exec /opt/ansible-venv/bin/ansible "$@"
+EOF
+sudo chmod +x /usr/local/bin/ansible
+
+# تکرار برای ansible-playbook, ansible-galaxy, ansible-vault, ansible-config, ansible-doc, ansible-inventory, ansible-console, ansible-connection
+for cmd in ansible-playbook ansible-galaxy ansible-vault ansible-config ansible-doc ansible-inventory ansible-console ansible-connection; do
+  sudo tee /usr/local/bin/$cmd >/dev/null <<EOF
+#!/bin/bash
+exec /opt/ansible-venv/bin/$cmd "\$@"
+EOF
+  sudo chmod +x /usr/local/bin/$cmd
+done
+
+انتقال بین سرورها
+bash
+
+# روی source
+tar czf ansible-venv.tgz /opt/ansible-venv
+
+# روی target
+sudo tar xzf ansible-venv.tgz -C /
+
+⚠️ venv قابل انتقال بین سیستم‌عامل‌های مشابه است (نه بین Ubuntu و RHEL).
+۱.۳ روش بسته‌های سیستمی
+Debian/Ubuntu
+bash
+
+# نسخه سیستمی (پایدار ولی قدیمی)
+sudo apt update
+sudo apt install -y ansible-core
+
+# یا bundle کامل (اگر repo دارد)
+sudo apt install -y ansible
+
+# PPA برای نسخه جدیدتر
+sudo add-apt-repository ppa:ansible/ansible
+sudo apt update
+sudo apt install -y ansible
+
+RHEL/Rocky/Alma
+bash
+
+# ansible-core از AppStream
+sudo dnf install -y ansible-core
+
+# یا Ansible bundle
+sudo dnf install -y ansible
+
+# repo رسمی Ansible (نسخه جدیدتر)
+sudo dnf install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm
+sudo dnf install -y ansible
+
+Fedora
+bash
+
+sudo dnf install -y ansible
+
+SUSE/openSUSE
+bash
+
+sudo zypper install -y ansible
+
+Alpine
+bash
+
+sudo apk add ansible
+sudo apk add ansible-core
+
+Arch
+bash
+
+sudo pacman -S ansible
+
+macOS (Homebrew)
+bash
+
+brew install ansible
+
+⚠️ محدودیت بسته‌های سیستمی
+
+    نسخه ممکن است چند ماه عقب باشد
+
+    روبه‌رو شدن با CVEها دیرتر
+
+    در production: استفاده از venv/pipx توصیه می‌شود نه بسته سیستمی (مگر محیط بسته که mirror داخلی مدیریت شده دارد)
+
+۱.۴ روش Container / Docker / Podman
+چرا؟
+
+    ایزوله
+
+    نسخه pin
+
+    برای CI/CD عالی
+
+    می‌توان به‌عنوان Execution Environment استفاده کرد
+
+نصب پایه
+bash
+
+# اجرای ad-hoc
+podman run --rm \
+  -v ~/.ssh:/root/.ssh:ro \
+  -v $(pwd):/work:z \
+  -w /work \
+  quay.io/ansible/creator-ee:latest \
+  ansible all -m ping -i inventory
+
+# یا با docker
+docker run --rm \
+  -v ~/.ssh:/root/.ssh:ro \
+  -v $(pwd):/work \
+  -w /work \
+  quay.io/ansible/creator-ee:latest \
+  ansible-playbook site.yml
+
+Wrapper برای استفاده روزمره
+bash
+
+cat > /usr/local/bin/ansible-ee <<'EOF'
+#!/bin/bash
+exec podman run --rm -it \
+  -v ~/.ssh:/root/.ssh:ro \
+  -v $(pwd):/work:z \
+  -v ~/.ansible:/root/.ansible:z \
+  -w /work \
+  --env ANSIBLE_CONFIG=/work/ansible.cfg \
+  quay.io/ansible/creator-ee:latest \
+  "$@"
+EOF
+chmod +x /usr/local/bin/ansible-ee
+
+# استفاده
+ansible-ee ansible-playbook site.yml
+ansible-ee ansible-galaxy collection list
+
+ساخت Execution Environment سفارشی
+bash
+
+pipx install ansible-builder
+
+cat > execution-environment.yml <<'YML'
+version: 3
+images:
+  base_image:
+    name: quay.io/ansible/creator-ee:latest
+dependencies:
+  galaxy:
+    collections:
+      - community.general
+      - amazon.aws
+  python:
+    - boto3==1.34.0
+  system:
+    - git
+    - rsync
+YML
+
+ansible-builder build -t my-ee:1.0 -f execution-environment.yml
+podman run --rm my-ee:1.0 ansible --version
+
+⚠️ محدودیت تحریمی
+
+Docker Hub و quay.io معمولاً از ایران محدودند. راه‌حل:
+
+    registry داخلی: docker.arvancloud.ir, registry.abrha.net, docker.mirror.arvancloud.ir
+
+    پروکسی: docker pull با HTTP_PROXY
+
+    ساخت آفلاین: دانلود روی سرور خارج، docker save، انتقال، docker load
+
+bash
+
+# دانلود روی ماشین با اینترنت
+docker pull quay.io/ansible/creator-ee:latest
+docker save quay.io/ansible/creator-ee:latest -o ee.tar
+
+# انتقال به سرور مقصد (آفلاین)
+scp ee.tar user@offline-server:/tmp/
+
+# بارگذاری
+docker load -i /tmp/ee.tar
+
+۱.۵ روش GitHub Release (بدون pip/PyPI)
+
+مزیت: از PyPI وابسته نیست؛ می‌توانید روی mirror آینه کنید.
+bash
+
+# دانلود tarball رسمی
+curl -L -o ansible-core.tar.gz \
+  https://github.com/ansible/ansible/releases/download/v2.17.6/ansible-core-2.17.6.tar.gz
+
+# verification
+curl -L -o ansible-core.tar.gz.asc \
+  https://github.com/ansible/ansible/releases/download/v2.17.6/ansible-core-2.17.6.tar.gz.asc
+gpg --verify ansible-core.tar.gz.asc ansible-core.tar.gz
+
+# نصب از tarball
+pip install ./ansible-core.tar.gz
+
+برای محیط تحریمی: استفاده از GitHub proxy
+bash
+
+# githack / ghproxy
+curl -L -o ansible-core.tar.gz \
+  https://ghproxy.com/https://github.com/ansible/ansible/releases/download/v2.17.6/ansible-core-2.17.6.tar.gz
+
+# یا پروکسی گیت
+git config --global url."https://ghproxy.com/https://github.com".insteadOf "https://github.com"
+
+⚠️ این پروکسی‌ها امنیت تضمین‌شده ندارند — همیشه GPG signature را verify کن قبل از نصب.
+۱.۶ استفاده از آینه (Mirror)های داخل ایران
+PyPI mirrors (Iranian / regional)
+Mirror	URL	پایداری
+Runflare	https://mirror-pypi.runflare.com/simple	✅ فعال
+Shatel	https://mirror.shatel.ir/pypi/simple/	✅ اکثراً فعال
+HMirror	https://repo.hmirror.ir/pypi/simple/	✅ اکثراً فعال
+Aliyun (CN)	https://mirrors.aliyun.com/pypi/simple/	✅ معمولاً
+Tsinghua (CN)	https://pypi.tuna.tsinghua.edu.cn/simple	✅ معمولاً
+تنظیم pip برای استفاده از mirror
+bash
+
+# موقت
+pip install --index-url https://mirror-pypi.runflare.com/simple --trusted-host mirror-pypi.runflare.com ansible-core
+
+# دائمی (فقط کاربر)
+mkdir -p ~/.config/pip
+cat > ~/.config/pip/pip.conf <<EOF
+[global]
+index-url = https://mirror-pypi.runflare.com/simple
+extra-index-url = https://pypi.org/simple
+trusted-host = mirror-pypi.runflare.com
+
+[install]
+upgrade-strategy = only-if-needed
+EOF
+
+# یا سراسری
+sudo mkdir -p /etc/pip
+sudo tee /etc/pip.conf <<EOF
+[global]
+index-url = https://mirror-pypi.runflare.com/simple
+trusted-host = mirror-pypi.runflare.com
+EOF
+
+Ubuntu/Debian mirror
+bash
+
+# /etc/apt/sources.list (Ubuntu 22.04)
+deb https://mirror.arvancloud.ir/ubuntu/ jammy main restricted universe multiverse
+deb https://mirror.arvancloud.ir/ubuntu/ jammy-updates main restricted universe multiverse
+deb https://mirror.arvancloud.ir/ubuntu/ jammy-security main restricted universe multiverse
+# یا
+deb https://repo.iut.ac.ir/ubuntu/ jammy main restricted universe multiverse
+
+RHEL/Rocky mirror
+bash
+
+sudo tee /etc/yum.repos.d/rocky.repo <<EOF
+[baseos]
+name=Rocky $releasever - BaseOS
+baseurl=https://mirror.arvancloud.ir/rocky/\$releasever/BaseOS/\$basearch/os/
+gpgcheck=1
+gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-Rocky-\$releasever
+enabled=1
+EOF
+
+⚠️ ریسک امنیتی mirrorهای غیررسمی
+
+    همیشه --require-hashes و gpgcheck=1 فعال
+
+    Hashها را از منبع رسمی چک کن (نه از mirror)
+
+    mirror داخلی با سیاست امنیتی خودت (mirror اختصاصی) بهترین است
+
+۱.۷ پروکسی / VPN برای دسترسی مستقیم
+با HTTP_PROXY / HTTPS_PROXY
+bash
+
+export HTTPS_PROXY=http://proxy.internal:3128
+export HTTP_PROXY=http://proxy.internal:3128
+export NO_PROXY=localhost,127.0.0.1,.internal
+
+pip install ansible-core
+
+با proxychains
+bash
+
+proxychains4 pip install ansible-core
+
+با --proxy
+bash
+
+pip install --proxy http://proxy.internal:3128 ansible-core
+
+با socks5
+bash
+
+pip install --proxy socks5://proxy.internal:1080 ansible-core
+
+⚠️ در محیط Production، proxy باید در DNS/firewall مجاز و لاگ شود. عبور از تحریم از طریق VPN شخصی = نقض سیاست امنیتی سازمان.
+۱.۸ کنار آمدن با تحریم: چک‌لیست عملی
+مشکل	راه‌حل
+pip install از pypi.org timeout	mirror ایرانی (Runflare/Shatel)
+pip install از pypi.org blocked (403)	mirror + --trusted-host
+GitHub blocked	ghproxy.com + GPG verify
+Docker Hub blocked	docker.arvancloud.ir یا registry.abrha.net
+quay.io blocked	mirror داخلی یا docker save/load
+APT/Ubuntu blocked	mirror.arvancloud.ir
+RHEL subscription blocked	Rocky/AlmaLinux + mirror داخلی
+Red Hat Automation Platform	AAP یا AWX آفلاین
+Ansible Galaxy blocked	mirror + ansible-galaxy install --server
+تنظیم ansible-galaxy برای mirror
+ini
+
+# ansible.cfg
+[galaxy]
+server_list = internal_hub, release_galaxy
+server = https://automation-hub.internal.example.com/api/galaxy/
+
+bash
+
+ansible-galaxy collection install community.general --server https://galaxy.example.local/api/
+
+✈️ بخش ۲: نصب کاملاً آفلاین (Air-Gapped)
+۲.۱ روش pip download / pip wheel (توصیه‌شده)
+مرحله ۱: روی ماشین با اینترنت (bundle builder)
+bash
+
+# مشخص کردن پلتفرم مقصد
+# از `pip debug --verbose` روی ماشین مقصد استفاده کن یا حدس بزن:
+# Linux x86_64, Python 3.10 → manylinux_2_17_x86_64, cp310
+
+mkdir -p /tmp/ansible-bundle
+
+# دانلود تمام wheelها + وابستگی‌ها
+pip download ansible-core==2.17.6 \
+  --dest /tmp/ansible-bundle \
+  --only-binary=:all: \
+  --platform manylinux_2_17_x86_64 \
+  --platform manylinux2014_x86_64 \
+  --python-version 310 \
+  --implementation cp \
+  --abi cp310
+
+# برای ansible bundle کامل
+pip download ansible==10.5.0 \
+  --dest /tmp/ansible-bundle \
+  --only-binary=:all: \
+  --platform manylinux2014_x86_64 \
+  --python-version 310 \
+  --implementation cp \
+  --abi cp310
+
+مرحله ۲: ساخت checksum و بسته
+bash
+
+cd /tmp
+sha256sum ansible-bundle/* > ansible-bundle.sha256
+
+# ساخت آرشیو
+tar czf ansible-bundle-$(date +%Y%m%d).tgz ansible-bundle ansible-bundle.sha256
+
+# امضا (اختیاری ولی توصیه‌شده)
+gpg --detach-sign -a ansible-bundle-$(date +%Y%m%d).tgz
+
+مرحله ۳: انتقال
+bash
+
+# با USB، scp، یا هر روش آفلاین
+scp ansible-bundle-*.tgz ansible-bundle-*.tgz.asc user@offline-server:/tmp/
+
+مرحله ۴: نصب روی ماشین آفلاین
+bash
+
+cd /tmp
+tar xzf ansible-bundle-*.tgz
+
+# تأیید امضا
+gpg --verify ansible-bundle-*.tgz.asc ansible-bundle-*.tgz
+
+# تأیید checksum
+cd ansible-bundle && sha256sum -c ../ansible-bundle.sha256
+
+# نصب آفلاین
+cd /tmp
+python3 -m venv /opt/ansible-venv
+source /opt/ansible-venv/bin/activate
+pip install --no-index --find-links=/tmp/ansible-bundle ansible-core==2.17.6
+
+⚠️ نکات مهم
+
+    --only-binary=:all: جلوی دانلود source package (که نیاز به build دارد) را می‌گیرد
+
+    --platform و --abi باید دقیقاً با ماشین مقصد یکی باشد
+
+    اگر پکیجی wheel نداشت، pip download نسخه source می‌آورد که روی مقصد به python3-dev, gcc نیاز دارد
+
+    برای Ansible معمولاً همه چیز wheel دارد (pure Python)
+
+تشخیص پلتفرم مقصد
+bash
+
+# روی ماشین مقصد (اگر دسترسی داری)
+python3 -c "import pip._internal.utils.compatibility_tags as t; print([str(x) for x in t.get_supported()][:5])"
+
+# یا از یونیک نام
+python3 -m pip debug --verbose | grep -E 'cp3|abi3|manylinux'
+
+۲.۲ روش apt-offline (Debian/Ubuntu)
+روی ماشین مقصد
+bash
+
+sudo apt install -y apt-offline
+sudo apt-offline set /tmp/apt-offline.sig
+
+# انتقال .sig به ماشین با اینترنت
+scp /tmp/apt-offline.sig user@online-machine:/tmp/
+
+روی ماشین با اینترنت
+bash
+
+sudo apt install -y apt-offline
+sudo apt-offline get /tmp/apt-offline.sig \
+  --bundle /tmp/apt-offline-bundle.zip \
+  --threads 5
+
+انتقال و نصب
+bash
+
+scp /tmp/apt-offline-bundle.zip user@target:/tmp/
+sudo apt-offline install /tmp/apt-offline-bundle.zip
+
+⚠️ بزرگ است چون کل package chain را می‌آورد. فقط اگر نمی‌توانی mirror داخلی داشته باشی استفاده کن.
+۲.۳ روش dnf download (RHEL/Rocky)
+روی ماشین با اینترنت و نسخه OS یکسان
+bash
+
+mkdir -p /tmp/rpms
+
+# همه وابستگی‌های ansible-core
+sudo dnf download --resolve --alldeps --destdir /tmp/rpms ansible-core
+sudo dnf download --resolve --alldeps --destdir /tmp/rpms python3-jinja2 python3-pyyaml
+
+# RPM-GPG keys
+sudo cp /etc/pki/rpm-gpg/RPM-GPG-KEY-* /tmp/rpms/
+
+# checksum
+cd /tmp/rpms && sha256sum *.rpm > SHA256SUMS
+
+انتقال و نصب
+bash
+
+scp -r /tmp/rpms user@offline-server:/tmp/
+
+# روی مقصد
+sudo dnf install --disablerepo='*' --nogpgcheck /tmp/rpms/*.rpm
+
+یا بهتر، ساخت local repo:
+bash
+
+# روی مقصد
+sudo dnf install -y createrepo_c
+sudo createrepo_c /tmp/rpms
+
+sudo tee /etc/yum.repos.d/local-ansible.repo <<EOF
+[local-ansible]
+name=Local Ansible Bundle
+baseurl=file:///tmp/rpms
+enabled=1
+gpgcheck=0
+EOF
+
+sudo dnf install -y ansible-core
+
+۲.۴ روش rsync یک mirror کامل
+
+اگر مقصد در شبکه داخلی است ولی اینترنت ندارد، یک mirror محلی از repoهای لازم راه‌اندازی کن:
+bash
+
+# روی یک ماشین با اینترنت (معمولاً DMZ)
+sudo apt mirror  # با apt-mirror یا debmirror
+
+# یا dnf
+dnf reposync --repoid=baseos --download-metadata -p /srv/mirror
+dnf reposync --repoid=appstream --download-metadata -p /srv/mirror
+
+سپس روی مقصد:
+bash
+
+sudo tee /etc/apt/sources.list.d/internal.list <<EOF
+deb http://mirror.internal.example.com/ubuntu jammy main restricted universe multiverse
+EOF
+
+# یا
+sudo tee /etc/yum.repos.d/internal.repo <<EOF
+[internal-baseos]
+name=Internal BaseOS
+baseurl=http://mirror.internal.example.com/rocky/9/BaseOS/x86_64/os/
+gpgcheck=1
+gpgkey=http://mirror.internal.example.com/rocky/RPM-GPG-KEY-rockyofficial
+EOF
+
+۲.۵ روش نصب از ISO (کاملاً آفلاین، بدون شبکه)
+برای Ubuntu/Debian
+bash
+
+# mount ISO
+sudo mount -o loop ubuntu-22.04.iso /mnt/
+
+# استفاده به‌عنوان repo
+sudo tee /etc/apt/sources.list <<EOF
+deb [trusted=yes] file:///mnt/ jammy main restricted universe multiverse
+EOF
+
+sudo apt update
+sudo apt install -y ansible-core
+
+sudo umount /mnt
+
+برای RHEL/Rocky/Alma
+bash
+
+sudo mount -o loop rocky-9.iso /mnt/
+
+sudo tee /etc/yum.repos.d/iso.repo <<EOF
+[iso-baseos]
+name=ISO BaseOS
+baseurl=file:///mnt/BaseOS
+enabled=1
+gpgcheck=0
+[iso-appstream]
+name=ISO AppStream
+baseurl=file:///mnt/AppStream
+enabled=1
+gpgcheck=0
+EOF
+
+sudo dnf install -y ansible-core
+
+⚠️ ISOها نسخه پایه OS دارند؛ Ansible ممکن است نسخه قدیمی باشد. برای production، bundle pip یا local mirror بهتر است.
+۲.۶ روش Container Image آفلاین
+روی ماشین با اینترنت
+bash
+
+# دانلود image
+podman pull quay.io/ansible/creator-ee:latest
+# یا
+docker pull quay.io/ansible/creator-ee:latest
+
+# ذخیره به فایل tar
+podman save quay.io/ansible/creator-ee:latest -o ansible-ee.tar
+# یا
+docker save quay.io/ansible/creator-ee:latest -o ansible-ee.tar
+
+انتقال و بازیابی
+bash
+
+scp ansible-ee.tar user@offline-server:/tmp/
+
+# روی مقصد
+podman load -i /tmp/ansible-ee.tar
+podman images | grep creator-ee
+
+# استفاده
+podman run --rm quay.io/ansible/creator-ee:latest ansible --version
+
+ساخت EE سفارشی آفلاین
+bash
+
+# روی ماشین با اینترنت
+podman run --rm quay.io/ansible/creator-ee:latest \
+  ansible-galaxy collection download -r requirements.yml -p /collections
+podman cp ...
+
+# ساده‌تر: از ansible-builder
+ansible-builder build -t my-ee:1.0 -f execution-environment.yml
+podman save my-ee:1.0 -o my-ee.tar
+
+۲.۷ نصب Collectionها به‌صورت آفلاین
+روی ماشین با اینترنت
+bash
+
+mkdir -p /tmp/collections-bundle
+
+# از requirements.yml
+cat > requirements.yml <<EOF
+collections:
+  - name: community.general
+    version: "==9.0.0"
+  - name: amazon.aws
+    version: "==6.5.0"
+EOF
+
+ansible-galaxy collection download -r requirements.yml -p /tmp/collections-bundle/
+
+# خروجی: تاربال‌ها + requirements.yml
+ls /tmp/collections-bundle/
+# community-general-9.0.0.tar.gz amazon-aws-6.5.0.tar.gz requirements.yml
+
+# checksum
+sha256sum /tmp/collections-bundle/*.tar.gz > /tmp/collections-bundle/SHA256SUMS
+
+tar czf collections-bundle.tgz -C /tmp collections-bundle
+
+روی ماشین آفلاین
+bash
+
+tar xzf collections-bundle.tgz -C /tmp
+sha256sum -c /tmp/collections-bundle/SHA256SUMS
+
+# نصب آفلاین (Ansible 2.13+)
+ansible-galaxy collection install -r /tmp/collections-bundle/requirements.yml \
+  --offline \
+  -p /etc/ansible/collections
+
+# یا دستی
+for f in /tmp/collections-bundle/*.tar.gz; do
+  ansible-galaxy collection install "$f" -p /etc/ansible/collections
+done
+
+نصب Roleهای آفلاین
+bash
+
+# روی ماشین با اینترنت
+ansible-galaxy role download geerlingguy.nginx -p /tmp/roles-bundle/
+# یا
+ansible-galaxy role install -r roles-requirements.yml -p /tmp/roles-bundle/
+
+# فایل‌های .tar.gz در /tmp/roles-bundle/
+
+# انتقال
+tar czf roles-bundle.tgz -C /tmp roles-bundle
+scp roles-bundle.tgz user@offline:/tmp/
+
+# نصب
+for f in /tmp/roles-bundle/*.tar.gz; do
+  ansible-galaxy role install "$f" -p /etc/ansible/roles
+done
+
+۲.۸ نصب Ansible بدون pip (کاملاً دستی)
+از tarball سورس
+bash
+
+# دانلود روی ماشین با اینترنت
+curl -L -o ansible-core.tar.gz \
+  https://github.com/ansible/ansible/releases/download/v2.17.6/ansible-core-2.17.6.tar.gz
+curl -L -o ansible-core.tar.gz.asc \
+  https://github.com/ansible/ansible/releases/download/v2.17.6/ansible-core-2.17.6.tar.gz.asc
+gpg --verify ansible-core.tar.gz.asc ansible-core.tar.gz
+
+# انتقال به مقصد
+scp ansible-core.tar.gz* user@offline:/tmp/
+
+# روی مقصد
+tar xzf ansible-core.tar.gz
+cd ansible-core-2.17.6
+
+# نصب وابستگی‌ها از pip offline bundle
+pip install --no-index --find-links=/tmp/ansible-bundle -r requirements.txt
+
+# نصب
+pip install --no-index --no-build-isolation .
+
+برای محیط‌هایی که pip ندارند (بسیار نادر)
+bash
+
+# نصب از source بدون pip
+python3 setup.py install
+# یا
+python3 -m build
+python3 -m pip install --no-index dist/*.whl
+
+🔒 بخش ۳: امن‌سازی نصب
+۳.۱ بررسی صحت و امضا
+pip با hash verification
+bash
+
+# محاسبه hash همه wheelها
+sha256sum /tmp/ansible-bundle/*.whl > /tmp/ansible-bundle/hashes.txt
+
+# ساخت requirements با hash
+cat > requirements-with-hashes.txt <<EOF
+ansible-core==2.17.6 \
+  --hash=sha256:abc123... \
+  --hash=sha256:def456...
+jinja2==3.1.4 \
+  --hash=sha256:...
+EOF
+
+# نصب با verify
+pip install --require-hashes -r requirements-with-hashes.txt
+
+pip با GPG (commit signing)
+bash
+
+# از GPG key توسعه‌دهنده Ansible
+gpg --recv-keys <KEY_ID>
+git verify-tag v2.17.6
+
+بررسی بسته‌های سیستمی
+bash
+
+# Debian
+dpkg -V ansible-core
+debsums -c
+
+# RHEL
+rpm -V ansible-core
+rpm --checksig ansible-core-*.rpm
+
+۳.۲ جداسازی محیط (Isolation)
+venv ایزوله با پرمیشن سخت‌گیرانه
+bash
+
+sudo groupadd ansible
+sudo useradd -r -m -g ansible -s /bin/bash ansible
+sudo mkdir -p /opt/ansible-venv
+sudo chown ansible:ansible /opt/ansible-venv
+sudo chmod 750 /opt/ansible-venv
+
+sudo -u ansible python3 -m venv /opt/ansible-venv
+sudo -u ansible /opt/ansible-venv/bin/pip install --upgrade pip
+sudo -u ansible /opt/ansible-venv/bin/pip install 'ansible-core==2.17.6'
+sudo chmod 750 /opt/ansible-venv/bin/*
+
+# دسترسی برای گروه
+sudo usermod -aG ansible deploy
+
+سیاست AppArmor/SELinux
+bash
+
+# SELinux: برچسب زدن
+sudo semanage fcontext -a -t bin_t "/opt/ansible-venv/bin(/.*)?"
+sudo restorecon -Rv /opt/ansible-venv/bin
+
+# AppArmor profile (نمونه)
+cat > /etc/apparmor.d/ansible <<EOF
+#include <tunables/global>
+/opt/ansible-venv/bin/ansible-playbook {
+  #include <abstractions/base>
+  #include <abstractions/python>
+  /opt/ansible-venv/** r,
+  /etc/ansible/** r,
+  /home/*/.ssh/** r,
+  deny /tmp/** w,
+}
+EOF
+sudo apparmor_parser -r /etc/apparmor.d/ansible
+
+۳.۳ کنترل دسترسی و Least Privilege
+user اختصاصی
+bash
+
+sudo useradd -m -s /bin/bash -G wheel ansible
+# در sudoers:
+echo 'ansible ALL=(root) NOPASSWD: /usr/bin/dnf, /usr/bin/systemctl' | \
+  sudo tee /etc/sudoers.d/ansible
+
+فایل‌های حساس
+bash
+
+# کانفیگ
+sudo chown root:ansible /etc/ansible/ansible.cfg
+sudo chmod 640 /etc/ansible/ansible.cfg
+
+# vault
+sudo chown ansible:ansible /etc/ansible/.vault_pass
+sudo chmod 600 /etc/ansible/.vault_pass
+
+# SSH keys
+sudo chown ansible:ansible /etc/ansible/keys/*
+sudo chmod 600 /etc/ansible/keys/*
+
+systemd hardening (اگر به‌عنوان سرویس اجرا می‌شود)
+ini
+
+# /etc/systemd/system/ansible-runner.service
+[Service]
+User=ansible
+Group=ansible
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+PrivateDevices=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+۳.۴ Pin کردن نسخه‌ها
+requirements.txt با hash
+text
+
+ansible-core==2.17.6 \
+    --hash=sha256:...
+jinja2==3.1.4 \
+    --hash=sha256:...
+PyYAML==6.0.2 \
+    --hash=sha256:...
+cryptography==43.0.3 \
+    --hash=sha256:...
+
+requirements.yml collectionها
+yaml
+
+collections:
+  - name: community.general
+    version: "==9.0.0"
+    source: https://galaxy.ansible.com
+  - name: amazon.aws
+    version: "==6.5.0"
+
+roles/requirements.yml
+yaml
+
+roles:
+  - name: geerlingguy.nginx
+    version: 3.1.4
+
+۳.۵ استفاده از mirror اختصاصی (بهترین ترکیب امنیت + تحریم)
+معماری
+text
+
+┌──────────────────┐        ┌─────────────────────┐        ┌──────────────┐
+│  Internet         │        │  Internal Mirror     │        │  Air-gapped  │
+│  pypi.org         │──pull──│  Artifactory/Nexus   │──push──│  Servers     │
+│  galaxy.ansible   │        │  (اسکن امنیتی + GPG) │        │  Ansible     │
+│  quay.io          │        │  + audit log         │        │  via mirror  │
+└──────────────────┘        └─────────────────────┘        └──────────────┘
+
+پیاده‌سازی با Nexus/Artifactory
+
+    PyPI proxy repo برای pypi.org
+
+    Collection proxy repo برای galaxy.ansible.com
+
+    Docker registry برای quay.io
+
+    حذف پکیج‌های CVE‌دار قبل از انتشار
+
+    GPG signing برای همه artifacts
+
+    Audit log روی همه pullها
+
+تنظیم client برای استفاده از mirror داخلی
+ini
+
+# /etc/pip.conf
+[global]
+index-url = https://nexus.internal/repository/pypi-proxy/simple
+trusted-host = nexus.internal
+
+ini
+
+# ansible.cfg
+[galaxy]
+server = https://nexus.internal/repository/ansible-galaxy/
+server_list = internal
+
+bash
+
+# docker
+sudo tee /etc/docker/daemon.json <<EOF
+{
+  "registry-mirrors": ["https://nexus.internal/"]
+}
+EOF
+
+🚀 بخش ۴: سناریوهای واقعی
+سناریو A: شرکت ایرانی با اینترنت محدود
+bash
+
+# 1. pip با mirror
+mkdir -p ~/.config/pip
+cat > ~/.config/pip/pip.conf <<EOF
+[global]
+index-url = https://mirror-pypi.runflare.com/simple
+extra-index-url = https://mirror.shatel.ir/pypi/simple/
+trusted-host = mirror-pypi.runflare.com
+trusted-host = mirror.shatel.ir
+EOF
+
+# 2. pipx + ansible
+pipx install ansible-core
+
+# 3. collections از mirror
+ansible-galaxy collection install community.general \
+  --server https://galaxy.ansible.com  # یا mirror اختصاصی
+
+# 4. verify
+ansible --version
+ansible localhost -m ping
+
+سناریو B: محیط Enterprise (proxy + محدودیت سخت)
+bash
+
+# 1. تنظیم proxy
+export HTTPS_PROXY=http://proxy.corp:3128
+export HTTP_PROXY=http://proxy.corp:3128
+export NO_PROXY=localhost,127.0.0.1,.corp
+
+# 2. pip با proxy و mirror داخلی
+pip config set global.index-url https://nexus.corp/repository/pypi/simple
+pip config set global.trusted-host nexus.corp
+pip config set global.proxy http://proxy.corp:3128
+
+# 3. نصب
+pipx install ansible-core
+
+# 4. collections از Automation Hub
+ansible-galaxy collection install -r requirements.yml \
+  --server https://automation-hub.corp/api/galaxy/
+
+سناریو C: Air-gapped کامل (banking/defense)
+bash
+
+# === روی ماشین با اینترنت ===
+mkdir -p /tmp/bundle
+
+# wheelها
+pip download ansible-core==2.17.6 \
+  --dest /tmp/bundle/wheels \
+  --only-binary=:all: \
+  --platform manylinux2014_x86_64 \
+  --python-version 310 --abi cp310 --implementation cp
+
+# collections
+ansible-galaxy collection download -r requirements.yml -p /tmp/bundle/collections
+
+# نقش‌ها
+ansible-galaxy role download -r roles-requirements.yml -p /tmp/bundle/roles
+
+# checksums و امضا
+cd /tmp/bundle
+find . -type f -exec sha256sum {} \; > SHA256SUMS
+gpg --detach-sign -a SHA256SUMS
+tar czf ansible-bundle.tgz bundle SHA256SUMS SHA256SUMS.asc
+
+# === انتقال USB (با chain-of-custody) ===
+
+# === روی ماشین آفلاین ===
+tar xzf ansible-bundle.tgz
+gpg --verify SHA256SUMS.asc SHA256SUMS
+sha256sum -c SHA256SUMS
+
+# نصب
+python3 -m venv /opt/ansible-venv
+source /opt/ansible-venv/bin/activate
+pip install --no-index --find-links=/tmp/bundle/wheels --require-hashes \
+  -r /tmp/bundle/requirements-with-hashes.txt
+
+ansible-galaxy collection install -r /tmp/bundle/collections/requirements.yml --offline
+ansible-galaxy role install -r /tmp/bundle/roles/roles-requirements.yml -p /etc/ansible/roles
+
+# verify
+ansible --version
+ansible-galaxy collection list
+
+سناریو D: Container-based کاملاً آفلاین
+bash
+
+# === روی ماشین با اینترنت ===
+podman pull quay.io/ansible/creator-ee:latest
+podman save quay.io/ansible/creator-ee:latest -o ee.tar
+
+# + ساخت EE سفارشی
+ansible-builder build -t company-ee:1.0 -f execution-environment.yml
+podman save company-ee:1.0 -o company-ee.tar
+
+sha256sum ee.tar company-ee.tar > SHA256SUMS
+gpg --detach-sign -a SHA256SUMS
+
+# === انتقال ===
+
+# === روی مقصد ===
+podman load -i ee.tar
+podman load -i company-ee.tar
+
+# استفاده
+podman run --rm company-ee:1.0 ansible --version
+
+⚠️ بخش ۵: نکات ویژه تحریم
+۵.۱ چه چیزهایی ممکن است مسدود باشند؟
+منبع	وضعیت از ایران	جایگزین
+pypi.org	معمولاً باز (گاهی کند)	mirror ایرانی
+galaxy.ansible.com	معمولاً باز	mirror داخلی
+github.com	معمولاً باز ولی کند	ghproxy.com + GPG
+quay.io	معمولاً محدود	docker.arvancloud.ir
+registry.redhat.io	بسته (تحریم)	Rocky/Alma + mirror
+access.redhat.com	بسته	مستندات mirror
+automation-hub.redhat.com	بسته	AWX/خصوصی
+docs.ansible.com	معمولاً باز	mirror یا آفلاین doc
+Google Cloud APIs	بسته	حساب خارج از ایران
+AWS APIs	بسته	حساب خارج از ایران
+۵.۲ نکات کاربردی
+ghproxy برای GitHub
+bash
+
+# تعویض URL
+git config --global url."https://ghproxy.com/https://github.com".insteadOf "https://github.com"
+
+# یا موقت
+git clone https://ghproxy.com/https://github.com/ansible/ansible.git
+
+⚠️ همیشه GPG verify کن — ghproxy می‌تواند دستکاری کند:
+bash
+
+gpg --verify release.tar.gz.asc release.tar.gz
+
+mirror برای Ubuntu
+bash
+
+sudo sed -i 's|http://archive.ubuntu.com|https://mirror.arvancloud.ir|g' /etc/apt/sources.list
+sudo sed -i 's|http://security.ubuntu.com|https://mirror.arvancloud.ir|g' /etc/apt/sources.list
+sudo apt update
+
+mirror برای Rocky
+bash
+
+sudo sed -i 's|mirrorlist=|#mirrorlist=|g' /etc/yum.repos.d/rocky*.repo
+sudo sed -i 's|#baseurl=http://dl.rockylinux.org|baseurl=https://mirror.arvancloud.ir|g' /etc/yum.repos.d/rocky*.repo
+sudo dnf makecache
+
+بررسی دسترسی قبل از شروع
+bash
+
+for url in \
+  https://pypi.org/simple/ \
+  https://mirror-pypi.runflare.com/simple/ \
+  https://galaxy.ansible.com/ \
+  https://mirror.arvancloud.ir/ubuntu/ ; do
+  echo -n "$url → "
+  curl -sS -o /dev/null -w "%{http_code} (%{time_total}s)\n" --max-time 10 "$url" || echo "FAIL"
+done
+
+📋 بخش ۶: جدول تصمیم‌گیری نهایی
+شرایط محیط	روش توصیه‌شده	امضا/hash	سطح امنیت
+اینترنت آزاد + production	venv + pip + --require-hashes	✅ GPG	⭐⭐⭐⭐⭐
+اینترنت آزاد + dev	pipx	✅ hash	⭐⭐⭐⭐
+اینترنت محدود + mirror	pipx + mirror	✅ hash	⭐⭐⭐⭐
+اینترنت محدود + proxy	venv + proxy	✅ GPG	⭐⭐⭐⭐
+Air-gapped	pip download + --require-hashes + GPG	✅ اجباری	⭐⭐⭐⭐⭐
+Air-gapped + scale	Nexus/Artifactory mirror	✅ اجباری	⭐⭐⭐⭐⭐
+Container-based	EE + docker save/load	✅ image digest	⭐⭐⭐⭐⭐
+Banking/Defense	Air-gap + mirror + GPG + audit	✅ اجباری + chain of custody	⭐⭐⭐⭐⭐⭐
+🛡️ بخش ۷: چک‌لیست امنیتی نهایی
+قبل از نصب
+
+    □
+
+    OS و پایتون آپدیت هستند (بدون CVE شناخته‌شده)
+    □
+
+    منبع دانلود مشخص و trusted است
+    □
+
+    GPG key منبع verify شده
+    □
+
+    checksum در دست است
+    □
+
+    user غیر‌روت برای اجرا وجود دارد
+    □
+
+    SELinux/AppArmor در نظر گرفته شده
+    □
+
+    firewall برای دسترسی به mirror/proxy تنظیم است
+
+حین نصب
+
+    □
+
+    --require-hashes فعال (pip)
+    □
+
+    gpgcheck=1 (dnf/apt)
+    □
+
+    --only-binary=:all: (pip download)
+    □
+
+    venv/pipx (نه system pip)
+    □
+
+    GPG verify بسته دانلودشده
+    □
+
+    --no-index در محیط آفلاین
+
+بعد از نصب
+
+    □
+
+    pip check بدون خطا
+    □
+
+    ansible --version و ansible localhost -m ping
+    □
+
+    ansible-galaxy collection list درست
+    □
+
+    ansible-config dump --only-changed بدون هشدار
+    □
+
+    log_path تنظیم و permission درست
+    □
+
+    chmod 750 /opt/ansible-venv
+    □
+
+    auditd روی /opt/ansible-venv, /etc/ansible
+    □
+
+    SIEM rule برای alert روی تغییر
+    □
+
+    backup از venv + configs
+
+برنامه نگهداری
+
+    □
+
+    CVE monitoring برای ansible-core، jinja2، cryptography
+    □
+
+    ارتقاء هر ۳-۶ ماه (با تست در staging)
+    □
+
+    چرخش requirements.txt با hash جدید
+    □
+
+    چرخش vault password هر ۹۰ روز
+    □
+
+    review دسترسی sudoers هر ۹۰ روز
+    □
+
+    review دسترسی mirrorها و whitelist
+
+🧪 بخش ۸: دستور معاینه (Health Check post-install)
+bash
+
+#!/bin/bash
+# ansible-healthcheck.sh
+set -euo pipefail
+
+echo "=== Ansible version ==="
+ansible --version
+
+echo "=== Python ==="
+python3 --version
+$(which ansible) --version | head -1
+
+echo "=== pip check ==="
+source /opt/ansible-venv/bin/activate
+pip check
+
+echo "=== pip list ==="
+pip list | grep -E 'ansible|jinja|yaml|cryptography'
+
+echo "=== config ==="
+ansible-config dump --only-changed
+
+echo "=== inventory ==="
+ansible-inventory --graph 2>&1 | head -20 || true
+
+echo "=== local ping ==="
+ansible localhost -m ping -c local
+
+echo "=== collections ==="
+ansible-galaxy collection list
+
+echo "=== roles ==="
+ansible-galaxy role list
+
+echo "=== signatures ==="
+if command -v gpg >/dev/null; then
+  echo "GPG available"
+fi
+
+echo "=== file perms ==="
+ls -la /opt/ansible-venv/bin/ansible /etc/ansible/ 2>/dev/null || true
+
+echo "=== DONE ==="
+
+🎯 جمع‌بندی
+
+برای محیط‌های تولیدی ایران (تحریم‌شده):
+
+    همیشه venv یا pipx — نه system pip
+
+    mirror ایرانی یا mirror اختصاصی — نه pypi.org مستقیم
+
+    --require-hashes و GPG — الزامی
+
+    آینه کردن همه بسته‌ها روی Nexus/Artifactory — برای مقیاس
+
+    Air-gapped: pip download + --only-binary + انتقال امن (USB با chain-of-custody) + verify
+
+    انتقال بین سرورها با tar venv — ساده و امن
+
+    Container/EE برای ایزوله‌سازی کامل و reproducibility
+
+    پایش CVE و ارتقاء دوره‌ای

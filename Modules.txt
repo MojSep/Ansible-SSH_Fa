@@ -1,0 +1,1953 @@
+﻿🧰 ماژول‌های پرکاربرد و حرفه‌ای Ansible در محیط‌های عملیاتی
+
+    این مرجع بر اساس استفاده واقعی در تیم‌های DevOps/SRE/Infrastructure است. هر ماژول با کاربرد → پارامترهای کلیدی → return values مهم → مثال production → نکات فنی و gotchaها → ملاحظات امنیتی توضیح داده می‌شود.
+
+📦 دسته ۱: مدیریت پکیج‌ها (Package Management)
+۱.۱ ansible.builtin.apt / ansible.builtin.dnf / ansible.builtin.yum
+
+کاربرد: نصب/حذف/ارتقاء پکیج روی Debian/Ubuntu (apt) و RHEL/Rocky/Alma (dnf/yum).
+
+پارامترهای کلیدی production:
+yaml
+
+apt:
+  name:                    # لیست یا string
+  state:                   # present | absent | latest | build-dep | fixed
+  update_cache:            # yes|no → اجرای apt update
+  cache_valid_time:        # ثانیه → اگر cache تازه‌تر، update نکن
+  autoremove:              # yes → پاک کردن وابستگی‌های بدون استفاده
+  purge:                   # yes → حذف فایل‌های config
+  deb:                     # مسیر فایل .deb محلی یا URL
+  install_recommends:      # no → نصب نکردن recommends
+  allow_unauthenticated:   # no (پیش‌فرض) → فقط بسته‌های امضا‌شده
+  dpkg_options:            # "force-confdef,force-confold"
+  force_apt_get:           # yes → استفاده از apt-get به‌جای apt
+
+yaml
+
+dnf:
+  name:
+  state:                   # present | absent | latest
+  enablerepo:              # فعال‌سازی repo خاص
+  disablerepo:
+  update_cache:            # yes
+  autoremove:
+  security:                # yes → فقط security updates (با state=latest)
+  bugfix:                  # yes → فقط bugfix
+  exclude:                 # پکیج‌های استثنا
+  disable_gpg_check:       # ⚠️ never in production
+  skip_broken:             # no (پیش‌فرض)
+
+Return values مهم:
+
+    changed, failed
+
+    results[] برای هر پکیج: name, version, state
+
+    cache_updated
+
+مثال production (multi-distro):
+yaml
+
+- name: install security packages
+  package:
+    name: "{{ pkg_list }}"
+    state: present
+  vars:
+    pkg_list:
+      - curl
+      - vim
+      - htop
+      - python3-apt
+      - ca-certificates
+
+- name: install from local .deb
+  apt:
+    deb: /tmp/myapp_1.2.3_amd64.deb
+    state: present
+
+- name: hold critical package
+  dpkg_selections:
+    name: openssh-server
+    selection: hold
+
+- name: security updates only (RHEL)
+  dnf:
+    name: "*"
+    state: latest
+    security: yes
+    update_cache: yes
+  when: ansible_os_family == "RedHat"
+
+نکات فنی و gotchaها:
+
+    state: latest = non-idempotent در ظاهر (always reports changed اگر update موجود باشد)
+
+    cache_valid_time: 3600 روی apt → سرعت بالا در اجراهای مکرر
+
+    update_cache: yes روی هر task = کند؛ فقط یک بار اجرا کن
+
+    برای apt با unattended-upgrades: APT::Periodic → apt lock
+
+    force_apt_get: yes برای محیط‌های غیرتعاملی (CI)
+
+    روی RHEL 8+: همیشه dnf نه yum (yum لایه سازگاری است)
+
+ملاحظات امنیتی:
+
+    هرگز disable_gpg_check: yes
+
+    allow_unauthenticated: no (پیش‌فرض)
+
+    برای apt: apt_repository با signed-by keyring
+
+    pin کردن نسخه در محیط حساس
+
+۱.۲ ansible.builtin.package (Generic)
+
+کاربرد: ماژول abstraction که خودش تشخیص می‌دهد apt یا dnf یا zypper.
+
+پارامترها:
+yaml
+
+package:
+  name:                    # فقط نام و state پشتیبانی می‌شوند
+  state:                   # present | absent | latest
+  use:                     # apt|dnf|yum|zypper|pacman → override auto-detection
+
+مثال:
+yaml
+
+- package:
+    name: [nginx, curl]
+    state: present
+  when: ansible_pkg_mgr in ['apt', 'dnf', 'yum']
+
+نکته: برای پارامترهای اختصاصی OS (مثلاً cache_valid_time)، از ماژول صریح استفاده کن.
+۱.۳ ansible.builtin.pip
+
+کاربرد: نصب پکیج پایتون روی هاست هدف یا در venv.
+yaml
+
+pip:
+  name:                    # string یا list
+  version:                 # ==1.2.3 | >=1.0 | latest
+  state:                   # present | absent | latest | forcereinstall
+  virtualenv:              # مسیر venv
+  virtualenv_command:      # python3 -m venv
+  virtualenv_python:       # /usr/bin/python3.11
+  requirements:            # مسیر requirements.txt
+  extra_args:              # "--index-url https://..."
+  umask:
+  executable:              # /usr/local/bin/pip3
+  chdir:                   # دایرکتوری اجرا
+
+مثال production (multi-venv):
+yaml
+
+- name: ensure venv
+  command: python3 -m venv /opt/app/venv
+  args: { creates: /opt/app/venv/bin/activate }
+
+- name: install requirements
+  pip:
+    requirements: /opt/app/requirements.txt
+    virtualenv: /opt/app/venv
+    virtualenv_python: /usr/bin/python3.11
+    extra_args: "--no-cache-dir --require-hashes"
+  register: pip_result
+
+نکات:
+
+    --require-hashes برای production (تأیید checksum)
+
+    virtualenv_command باید صریح باشد (بعضی سیستم‌ها default ندارند)
+
+    state: latest در pip = non-idempotent
+
+۱.۴ ansible.builtin.apt_repository / ansible.builtin.yum_repository
+
+کاربرد production: افزودن mirror داخلی، repo اختصاصی، repo با GPG key.
+yaml
+
+- name: add internal mirror
+  apt_repository:
+    repo: "deb [signed-by=/etc/apt/keyrings/internal.gpg] https://mirror.internal/ubuntu jammy main"
+    state: present
+    filename: internal
+    update_cache: yes
+
+- name: add GPG key
+  apt_key:
+    url: https://mirror.internal/key.gpg
+    keyring: /etc/apt/keyrings/internal.gpg
+    state: present
+
+yaml
+
+- name: add repo (RHEL)
+  yum_repository:
+    name: epel
+    description: EPEL
+    baseurl: https://mirror.internal/epel/$releasever/$basearch/
+    gpgcheck: yes
+    gpgkey: https://mirror.internal/RPM-GPG-KEY-EPEL-9
+    enabled: yes
+
+ملاحظات امنیتی:
+
+    signed-by در apt keyring اجباری
+
+    gpgcheck: yes هرگز تغییر نده
+
+    keyring path: /etc/apt/keyrings/ (نه /etc/apt/trusted.gpg.d/ که deprecated است)
+
+⚙️ دسته ۲: مدیریت سرویس‌ها
+۲.۱ ansible.builtin.systemd / ansible.builtin.service
+
+کاربرد: کنترل چرخه حیات سرویس.
+yaml
+
+systemd:
+  name:
+  state:                   # started | stopped | restarted | reloaded
+  enabled:                 # yes|no
+  masked:                  # yes|no
+  daemon_reload:           # yes → بعد از تغییر unit
+  daemon_reexec:           # yes → systemctl daemon-reexec
+  no_block:                # yes → non-blocking (برای reboot)
+  scope:                   # system | user
+  force:                   # yes → override
+
+Return values: status.{ActiveState, SubState, LoadState}, changed
+
+مثال production:
+yaml
+
+- name: change systemd unit
+  template:
+    src: myapp.service.j2
+    dest: /etc/systemd/system/myapp.service
+  notify:
+    - reload systemd
+    - restart myapp
+
+- name: start app
+  systemd:
+    name: myapp
+    state: started
+    enabled: yes
+    daemon_reload: yes
+
+- name: reload only if config changed
+  systemd:
+    name: nginx
+    state: reloaded
+  when: nginx_config.changed
+
+Handlers استاندارد:
+yaml
+
+handlers:
+  - name: reload systemd
+    systemd: { daemon_reload: yes }
+  - name: restart myapp
+    systemd: { name: myapp, state: restarted, daemon_reload: yes }
+
+نکات فنی:
+
+    daemon_reload: yes اجباری بعد از تغییر unit
+
+    برای state: reloaded → فقط اگر سرویس ExecReload داشته باشد
+
+    masked: yes = جلوگیری کامل از start (حتی دستی)
+
+    اگر container است: service_mgr را چک کن (when: ansible_service_mgr == 'systemd')
+
+📁 دسته ۳: فایل و تمپلیت
+۳.۱ ansible.builtin.copy
+
+کاربرد production: توزیع فایل کانفیگ، backup، استقرار artifact.
+yaml
+
+copy:
+  src:                    # مسیر محلی یا remote (با remote_src=yes)
+  dest:                   # مسیر هدف
+  content:                # به‌جای src → string
+  owner/group/mode:       # '0644' → همیشه به‌صورت string
+  backup:                 # yes → timestamped backup
+  force:                  # yes|no
+  remote_src:             # yes → از هدف به هدف
+  validate:               # "nginx -t -c %s"
+  directory_mode:         # برای directory
+  follow:                 # yes → symlink target
+  checksum:               # sha1:... → idempotency
+
+Return values: changed, checksum, dest, backup_file
+
+مثال production:
+yaml
+
+- name: deploy config with validation
+  copy:
+    src: nginx.conf
+    dest: /etc/nginx/nginx.conf
+    owner: root
+    group: root
+    mode: '0644'
+    backup: yes
+    validate: 'nginx -t -c %s'
+  notify: restart nginx
+
+- name: deploy binary
+  copy:
+    src: "dist/app-{{ version }}"
+    dest: /opt/app/app
+    mode: '0755'
+    checksum: "sha256:{{ app_sha256 }}"
+
+نکات:
+
+    mode: '0644' (با کوتیشن) → اجتناب از interpret به octal
+
+    validate قبل از جایگزینی → فایل ناسالم مستقر نمی‌شود
+
+    checksum برای idempotency قوی
+
+    برای فایل‌های بزرگ: synchronize یا unarchive سریع‌تر
+
+۳.۲ ansible.builtin.template (Jinja2)
+
+کاربرد production: تولید configهای پویا (بر اساس fact، env، version).
+yaml
+
+template:
+  src:                    # *.j2
+  dest:
+  owner/group/mode:
+  backup:
+  validate:               # ← حیاتی
+  trim_blocks:            # yes → حذف newline بعد از block
+  lstrip_blocks:          # yes → trim leading whitespace
+  newline_sequence:       # '\n' | '\r\n'
+  block_start_string:     # '{%' | ...
+  variable_start_string:  # '{{' | ...
+  variable_end_string:    # '}}' | ...
+
+مثال production (multi-env):
+yaml
+
+# templates/nginx.conf.j2
+user {{ nginx_user | default('www-data') }};
+worker_processes {{ ansible_processor_vcpus }};
+{% if env == 'production' %}
+worker_rlimit_nofile 65535;
+{% endif %}
+events {
+    worker_connections {{ nginx_worker_connections | default(1024) }};
+}
+http {
+    sendfile on;
+    keepalive_timeout {{ nginx_keepalive | default(65) }};
+    {% for upstream in nginx_upstreams %}
+    upstream {{ upstream.name }} {
+        {% for server in upstream.servers %}
+        server {{ server }};
+        {% endfor %}
+    }
+    {% endfor %}
+}
+
+yaml
+
+- template:
+    src: nginx.conf.j2
+    dest: /etc/nginx/nginx.conf
+    mode: '0644'
+    validate: 'nginx -t -c %s'
+    trim_blocks: yes
+    lstrip_blocks: yes
+  notify: reload nginx
+
+نکات:
+
+    validate اجباری برای configهای حساس
+
+    trim_blocks + lstrip_blocks = خروجی تمیز
+
+    برای % (nginx): {% raw %}...{% endraw %}
+
+    ansible_managed در header برای هشدار "do not edit"
+
+۳.۳ ansible.builtin.lineinfile / blockinfile / replace
+
+کاربرد production: تغییر فایل سیستمی موجود (نه جایگزینی کامل).
+yaml
+
+- name: disable root login
+  lineinfile:
+    path: /etc/ssh/sshd_config
+    regexp: '^#?\s*PermitRootLogin'
+    line: 'PermitRootLogin no'
+    state: present
+    backup: yes
+    validate: 'sshd -t -f %s'
+
+- name: append if not exists
+  lineinfile:
+    path: /etc/environment
+    line: 'JAVA_HOME=/usr/lib/jvm/default-java'
+    state: present
+
+- name: remove line
+  lineinfile:
+    path: /etc/hosts
+    regexp: '^10\.0\.0\.1'
+    state: absent
+
+- name: insert after
+  lineinfile:
+    path: /etc/ssh/sshd_config
+    insertafter: '^#?PermitRootLogin'
+    line: 'AllowUsers deploy admin'
+    validate: 'sshd -t -f %s'
+
+yaml
+
+- name: block config
+  blockinfile:
+    path: /etc/ssh/sshd_config
+    marker: "# {mark} ANSIBLE MANAGED - SECURITY"
+    block: |
+      PermitRootLogin no
+      PasswordAuthentication no
+      PubkeyAuthentication yes
+      X11Forwarding no
+    validate: 'sshd -t -f %s'
+    backup: yes
+
+yaml
+
+- name: replace pattern
+  replace:
+    path: /etc/selinux/config
+    regexp: '^SELINUX=.*'
+    replace: 'SELINUX=enforcing'
+
+نکات:
+
+    regexp با ^ و $ برای دقت
+
+    validate در فایل‌های سرویس اجباری
+
+    هرگز lineinfile بدون regexp → append می‌کند
+
+    blockinfile marker برای idempotency ({mark} حذف/اضافه)
+
+    برای تغییرات پیچیده: template به‌جای lineinfile
+
+۳.۴ ansible.builtin.file / stat / find
+yaml
+
+# ساخت دایرکتوری
+- file:
+    path: /var/lib/app/data
+    state: directory
+    owner: app
+    group: app
+    mode: '0755'
+    setype: container_file_t    # SELinux
+
+# symlink
+- file:
+    src: /opt/app-v1.2.3
+    dest: /opt/app-current
+    state: link
+    force: yes
+
+# حذف
+- file:
+    path: /tmp/old.lock
+    state: absent
+
+# حذف recursive
+- file:
+    path: /var/cache/old
+    state: absent
+    recurse: no
+
+# touch (preserve time)
+- file:
+    path: /var/lib/app/.last_check
+    state: touch
+    modification_time: preserve
+    access_time: preserve
+
+yaml
+
+- name: check file exists
+  stat:
+    path: /etc/app/config
+    checksum_algorithm: sha256
+    follow: no
+  register: st
+
+- debug:
+    msg: "exists and size {{ st.stat.size }}"
+  when: st.stat.exists
+
+- debug:
+    msg: "symlink to {{ st.stat.lnk_source }}"
+  when: st.stat.islnk
+
+yaml
+
+- name: find old logs
+  find:
+    paths: [/var/log]
+    patterns: ["*.log", "*.gz"]
+    age: 30d
+    size: 100m
+    recurse: yes
+    file_type: file
+  register: old_logs
+
+- file:
+    path: "{{ item.path }}"
+    state: absent
+  loop: "{{ old_logs.files }}"
+
+۳.۵ ansible.posix.synchronize (rsync)
+
+کاربرد production: انتقال سریع فایل‌های بزرگ، dir sync با exclude.
+yaml
+
+synchronize:
+  src:
+  dest:
+  mode:                    # push (default) | pull
+  delete:                  # yes → حذف فایل‌های حذف‌شده روی مقصد
+  recursive:               # yes
+  rsync_opts:              # ["--exclude=.git", "--chmod=D755,F644"]
+  rsync_path:              # "sudo rsync" اگر become لازم
+  compress:                # yes
+  checksum:                # yes → idempotency دقیق
+  delay_updates:           # yes → برای live dir
+  archive:                 # yes (پیش‌فرض)
+  exclude:
+  include:
+
+مثال production:
+yaml
+
+- name: deploy static assets
+  synchronize:
+    src: ./dist/
+    dest: /var/www/html/
+    delete: yes
+    rsync_opts:
+      - "--exclude=*.map"
+      - "--chmod=D755,F644"
+    checksum: yes
+  delegate_to: "{{ inventory_hostname }}"
+
+نکات:
+
+    synchronize روی control node اجرا می‌شود (نه remote) → با delegate_to: {{ inventory_hostname }} به remote منتقل شود
+
+    delete: yes خطرناک است → فقط با checksum و تست
+
+    برای فایل بزرگ: سریع‌تر از copy
+
+۳.۶ ansible.builtin.unarchive / archive
+yaml
+
+- name: extract archive
+  unarchive:
+    src: /tmp/app.tar.gz
+    dest: /opt/app
+    remote_src: yes
+    owner: app
+    group: app
+    mode: '0755'
+    creates: /opt/app/app        # idempotency
+    extra_opts: ['--strip-components=1']
+
+- name: create archive
+  archive:
+    path: /var/log/app/
+    dest: /backup/logs-{{ ansible_date_time.date }}.tar.gz
+    format: gz
+    exclude_path: ['*.pid']
+
+👤 دسته ۴: کاربر، گروه، دسترسی
+۴.۱ ansible.builtin.user / group
+yaml
+
+user:
+  name:
+  uid:
+  gid:
+  groups:                  # لیست (با append: yes)
+  append:                  # yes → اضافه به groups موجود
+  shell:
+  home:
+  create_home:             # yes
+  move_home:               # yes (اگر home تغییر کرد)
+  password:                # hash شده (نه plain)
+  update_password:         # always | on_create
+  expires:                 # epoch date
+  generate_ssh_key:        # yes
+  ssh_key_type:            # ed25519 | rsa | ecdsa
+  ssh_key_bits:            # 4096 (برای rsa)
+  ssh_key_file:            # .ssh/id_ed25519
+  state:                   # present | absent
+  remove:                  # yes → حذف home
+  system:                  # yes → system account
+
+yaml
+
+- name: create deploy user
+  user:
+    name: deploy
+    groups: [sudo, docker]
+    append: yes
+    shell: /bin/bash
+    create_home: yes
+    generate_ssh_key: yes
+    ssh_key_type: ed25519
+    password: "{{ vault_deploy_pw | password_hash('sha512', deploy_salt) }}"
+    update_password: on_create
+    state: present
+
+- group:
+    name: developers
+    gid: 2000
+    state: present
+
+نکات امنیتی:
+
+    password_hash('sha512', salt) — salt تصادفی
+
+    update_password: on_create → فقط در ساخت اول
+
+    هرگز plain password
+
+    برای sudoers: chmod 0440 + visudo -cf %s
+
+۴.۲ ansible.posix.authorized_key
+yaml
+
+authorized_key:
+  user:
+  key:                     # کلید یا lookup('file', ...) یا URL
+  state:                   # present | absent
+  exclusive:               # yes → فقط این کلیدها (خطرناک!)
+  manage_dir:              # yes (پیش‌فرض)
+  validate_certs:          # yes
+  key_options:             # 'from="10.0.0.0/24",command="/bin/false"'
+
+yaml
+
+- name: distribute keys from central directory
+  authorized_key:
+    user: deploy
+    key: "{{ lookup('file', 'keys/' + item + '.pub') }}"
+    state: present
+  loop: "{{ deploy_authorized_users }}"
+
+- name: restricted admin key
+  authorized_key:
+    user: root
+    key: "{{ lookup('file', 'keys/admin.pub') }}"
+    key_options: 'from="10.0.0.0/24",no-port-forwarding'
+
+نکته: exclusive: yes روی root = خطر خودقفل‌شدن. همیشه manage_dir: yes برای درست کردن perms.
+۴.۳ ansible.posix.sudoers
+yaml
+
+- name: sudoers for deploy
+  copy:
+    content: |
+      # Managed by Ansible
+      Defaults:deploy !requiretty
+      deploy ALL=(root) NOPASSWD: /usr/bin/systemctl, /usr/bin/dnf
+    dest: /etc/sudoers.d/90-deploy
+    mode: '0440'
+    owner: root
+    group: root
+    validate: 'visudo -cf %s'
+
+نکته طلایی: validate: 'visudo -cf %s' = جلوگیری از قفل sudo. همیشه در sudoers اعمال کن.
+🛡️ دسته ۵: امنیت و SELinux
+۵.۱ ansible.posix.seboolean / community.general.sefcontext / community.general.selogin
+yaml
+
+- name: enable SELinux boolean
+  seboolean:
+    name: httpd_can_network_connect
+    state: yes
+    persistent: yes
+
+- name: set fcontext
+  sefcontext:
+    target: '/var/www/html(/.*)?'
+    setype: httpd_sys_content_t
+    state: present
+
+- name: apply restorecon
+  command: restorecon -Rv /var/www/html
+  changed_when: false
+
+- name: selinux enforcing
+  selinux:
+    state: enforcing
+    policy: targeted
+
+نکته: sefcontext فقط policy را ثبت می‌کند؛ restorecon باید اجرا شود تا اعمال شود. command: restorecon با changed_when: false.
+۵.۲ ansible.posix.firewalld / community.general.ufw
+yaml
+
+# firewalld (RHEL)
+- firewalld:
+    service: https
+    permanent: yes
+    state: enabled
+    immediate: yes
+    zone: public
+
+- firewalld:
+    port: '8080/tcp'
+    permanent: yes
+    state: enabled
+    immediate: yes
+
+- firewalld:
+    rich_rule: 'rule family=ipv4 source address=10.0.0.0/8 service name=ssh accept'
+    permanent: yes
+    state: enabled
+
+- firewalld:
+    source: 192.168.1.0/24
+    zone: trusted
+    permanent: yes
+    state: enabled
+
+yaml
+
+# ufw (Ubuntu)
+- ufw:
+    rule: allow
+    port: '22'
+    proto: tcp
+
+- ufw:
+    rule: limit          # rate-limit SSH
+    port: '22'
+
+- ufw:
+    default: deny
+    direction: incoming
+
+- ufw:
+    state: enabled
+
+نکته امنیتی: rule: limit روی SSH برای جلوگیری از brute-force. همیشه SSH را قبل از default: deny باز کن.
+۵.۳ community.crypto.x509_certificate / openssl_privatekey / openssl_csr
+
+کاربرد production: مدیریت SSL/TLS certificate (Let's Encrypt، internal CA، self-signed).
+yaml
+
+- name: generate private key
+  openssl_privatekey:
+    path: /etc/ssl/private/app.key
+    size: 4096
+    type: RSA
+    mode: '0600'
+    owner: root
+  no_log: true
+
+- name: generate CSR
+  openssl_csr:
+    path: /etc/ssl/certs/app.csr
+    privatekey_path: /etc/ssl/private/app.key
+    common_name: app.example.com
+    subject_alt_name:
+      - DNS:app.example.com
+      - DNS:www.app.example.com
+      - IP:10.0.0.1
+    country_name: IR
+    organization_name: Example
+
+- name: sign with internal CA
+  x509_certificate:
+    path: /etc/ssl/certs/app.crt
+    csr_path: /etc/ssl/certs/app.csr
+    provider: ownca
+    ownca_path: /etc/ssl/certs/ca.crt
+    ownca_privatekey_path: /etc/ssl/private/ca.key
+    ownca_not_after: +365d
+
+- name: deploy to nginx
+  copy:
+    src: /etc/ssl/certs/app.crt
+    dest: /etc/nginx/ssl/app.crt
+
+نکات:
+
+    no_log: true روی private key
+
+    mode: '0600' اجباری
+
+    subject_alt_name مدرن (نه subject.subjectAltName)
+
+    برای Let's Encrypt: acme_certificate یا certbot از طریق command
+
+۵.۴ community.hashi_vault.vault_kv2_get / hashi_vault lookup
+
+کاربرد production: دریافت secret از HashiCorp Vault.
+yaml
+
+- name: get db password from vault
+  community.hashi_vault.vault_kv2_get:
+    url: https://vault.internal:8200
+    auth_method: approle
+    role_id: "{{ vault_role_id }}"
+    secret_id: "{{ vault_secret_id }}"
+    engine_mount_point: secret
+    path: apps/prod/database
+  register: db_creds
+  no_log: true
+
+- name: use password
+  mysql_user:
+    name: app
+    password: "{{ db_creds.secret.password }}"
+  no_log: true
+
+نکته: هرگز role_id/secret_id را hardcode نکن؛ از env یا file استفاده کن.
+۵.۵ ansible.posix.at / cron
+yaml
+
+- cron:
+    name: daily-backup
+    minute: '0'
+    hour: '2'
+    user: root
+    job: '/usr/local/bin/backup.sh >> /var/log/backup.log 2>&1'
+    state: present
+
+- cron:
+    name: cleanup
+    minute: '*/15'
+    job: '/usr/local/bin/cleanup.sh'
+    cron_file: ansible_cleanup
+    user: app
+
+نکته: cron_file → فایل /etc/cron.d/ می‌سازد (multi-user). همیشه user صریح.
+🌐 دسته ۶: شبکه و URL
+۶.۱ ansible.builtin.uri
+
+کاربرد production: health check، REST API call، webhook.
+yaml
+
+uri:
+  url:
+  method:                  # GET|POST|PUT|DELETE|PATCH
+  body:                    # dict یا string
+  body_format:             # json | form-urlencoded | raw
+  headers:                 # dict
+  status_code:             # [200, 201] | 200
+  timeout:                 # 30
+  return_content:          # yes → register.body
+  validate_certs:          # yes (production)
+  follow_redirects:        # none|safe|all
+  force_basic_auth:        # yes → با Basic auth
+  url_username:
+  url_password:
+  client_cert:
+  client_key:
+  dest:                    # برای دانلود فایل
+  creates:                 # idempotency
+  unix_socket:             # docker socket
+
+Return values: status, content, json, headers, redirected, elapsed
+
+مثال production (health check):
+yaml
+
+- name: wait for app to be ready
+  uri:
+    url: "http://{{ inventory_hostname }}:8080/health"
+    status_code: 200
+    timeout: 5
+    return_content: no
+  register: health
+  retries: 30
+  delay: 2
+  until: health.status == 200
+  changed_when: false
+
+مثال production (API + token):
+yaml
+
+- name: deploy via API
+  uri:
+    url: "https://api.example.com/v1/deploy"
+    method: POST
+    body_format: json
+    body:
+      version: "{{ app_version }}"
+      env: production
+    headers:
+      Authorization: "Bearer {{ api_token }}"
+      Content-Type: application/json
+    status_code: [200, 202]
+    validate_certs: yes
+  no_log: true
+  register: deploy_response
+
+مثال production (webhook Slack):
+yaml
+
+- name: notify slack
+  uri:
+    url: "{{ slack_webhook }}"
+    method: POST
+    body_format: json
+    body:
+      text: "Deploy {{ app_version }} completed on {{ ansible_date_time.iso8601 }}"
+      channel: "#deploys"
+    status_code: 200
+  delegate_to: localhost
+
+۶.۲ ansible.builtin.get_url
+yaml
+
+- name: download binary
+  get_url:
+    url: "https://github.com/org/tool/releases/download/v{{ version }}/tool-linux-amd64"
+    dest: /usr/local/bin/tool
+    mode: '0755'
+    checksum: "sha256:{{ tool_sha256 }}"
+    owner: root
+    group: root
+    timeout: 30
+    force: no                # idempotency با checksum
+
+- name: download with headers
+  get_url:
+    url: https://private.internal/file.tar.gz
+    dest: /tmp/file.tar.gz
+    headers:
+      X-API-Key: "{{ api_key }}"
+    checksum: "sha512:{{ expected }}"
+
+نکته امنیتی: همیشه checksum → تأیید محتوا. بدون آن، MITM خطرناک است.
+۶.۳ community.general.nmcli / ansible.builtin.hostname
+yaml
+
+- name: set hostname
+  hostname:
+    name: "{{ inventory_hostname }}"
+    use: systemd
+
+- name: network config
+  nmcli:
+    conn_name: eth0
+    ifname: eth0
+    type: ethernet
+    ip4: 10.0.0.5/24
+    gw4: 10.0.0.1
+    dns4: [8.8.8.8, 1.1.1.1]
+    state: present
+    autoconnect: yes
+
+🐳 دسته ۷: Docker
+۷.۱ community.docker.docker_image
+yaml
+
+- name: pull image
+  community.docker.docker_image:
+    name: nginx
+    tag: "1.25-alpine"
+    source: pull
+    force_source: no
+  register: img
+
+- name: build image
+  community.docker.docker_image:
+    name: myapp
+    tag: "{{ version }}"
+    source: build
+    build:
+      path: /opt/app
+      dockerfile: Dockerfile
+      args:
+        VERSION: "{{ version }}"
+
+۷.۲ community.docker.docker_container
+yaml
+
+- name: run app container
+  community.docker.docker_container:
+    name: myapp
+    image: "myapp:{{ version }}"
+    state: started
+    restart_policy: always
+    ports:
+      - "8080:8080"
+    volumes:
+      - /var/lib/myapp:/app/data:rw
+      - /etc/myapp:/etc/myapp:ro
+    env:
+      ENV: production
+      DB_HOST: "{{ db_host }}"
+      DB_PASSWORD: "{{ vault_db_password }}"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    log_driver: json-file
+    log_options:
+      max-size: "10m"
+      max-file: "3"
+    networks:
+      - name: app-net
+    capabilities: []
+    security_opts: ["no-new-privileges:true"]
+    ulimits:
+      - "nofile:65536:65536"
+    cpu_shares: 512
+    memory: 1g
+    memory_swap: 1g
+  no_log: false
+
+- name: wait for healthy
+  uri:
+    url: "http://localhost:8080/health"
+    status_code: 200
+  retries: 30
+  delay: 2
+  until: health.status == 200
+
+نکات امنیتی container:
+
+    security_opts: ["no-new-privileges:true"] → جلوگیری از escalation
+
+    capabilities: [] → حذف همه، فقط لازم‌ها را اضافه کن
+
+    read_only: yes (اگر امکان دارد)
+
+    user: "1001:1001" → non-root
+
+    pid_mode: host ⚠️ خطرناک
+
+۷.۳ community.docker.docker_compose_v2
+yaml
+
+- name: deploy compose stack
+  community.docker.docker_compose_v2:
+    project_src: /opt/stack
+    state: present
+    pull: always
+    remove_orphans: yes
+  register: output
+
+- name: wait for services
+  uri:
+    url: "http://localhost:8080/health"
+    status_code: 200
+  retries: 30
+  delay: 3
+
+۷.۴ community.docker.docker_network / docker_volume
+yaml
+
+- docker_network:
+    name: app-net
+    driver: bridge
+    ipam_config:
+      - subnet: 172.20.0.0/16
+
+- docker_volume:
+    name: app-data
+    driver: local
+    driver_options:
+      type: nfs
+      o: addr=nfs.internal,rw
+      device: ":/export/app"
+
+☸️ دسته ۸: Kubernetes
+۸.۱ kubernetes.core.k8s
+yaml
+
+- name: deploy manifest
+  kubernetes.core.k8s:
+    state: present
+    src: /manifests/deployment.yml
+    namespace: production
+    kubeconfig: /etc/kubernetes/admin.conf
+    wait: yes
+    wait_timeout: 300
+    wait_condition:
+      type: Available
+      status: "True"
+
+- name: inline definition
+  kubernetes.core.k8s:
+    state: present
+    namespace: production
+    definition:
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: myapp
+      spec:
+        replicas: 3
+        selector:
+          matchLabels: { app: myapp }
+        template:
+          metadata:
+            labels: { app: myapp }
+          spec:
+            containers:
+              - name: app
+                image: "myapp:{{ version }}"
+                ports: [{ containerPort: 8080 }]
+
+۸.۲ kubernetes.core.k8s_info
+yaml
+
+- name: get pods
+  kubernetes.core.k8s_info:
+    kind: Pod
+    namespace: production
+    label_selectors:
+      - app=myapp
+  register: pods
+
+- name: check all ready
+  assert:
+    that:
+      - pods.resources | length == 3
+      - pods.resources | selectattr('status.phase', 'equalto', 'Running') | list | length == 3
+
+۸.۳ kubernetes.core.helm
+yaml
+
+- name: deploy helm chart
+  kubernetes.core.helm:
+    name: myapp
+    chart_ref: ./charts/myapp
+    release_namespace: production
+    values_files: [values.yaml]
+    values:
+      image.tag: "{{ version }}"
+    wait: yes
+    atomic: yes
+    timeout: 10m
+    force: no
+
+نکته: atomic: yes → اگر fail، rollback خودکار.
+☁️ دسته ۹: Cloud (AWS)
+۹.۱ amazon.aws.ec2_instance
+yaml
+
+- name: launch instance
+  amazon.aws.ec2_instance:
+    name: web01
+    region: us-east-1
+    instance_type: t3.micro
+    image_id: ami-0abcdef
+    key_name: deploy
+    security_group: web-sg
+    vpc_subnet_id: subnet-abc
+    network:
+      assign_public_ip: yes
+    volumes:
+      - device_name: /dev/sda1
+        ebs:
+          volume_size: 50
+          volume_type: gp3
+          delete_on_termination: true
+    tags:
+      Environment: production
+      Role: web
+    wait: yes
+    state: running
+  register: ec2
+  delegate_to: localhost
+
+- name: wait for SSH
+  wait_for_connection:
+    timeout: 300
+  delegate_to: "{{ ec2.instances[0].public_ip_address }}"
+
+۹.۲ amazon.aws.s3_object
+yaml
+
+- name: upload artifact
+  amazon.aws.s3_object:
+    bucket: my-artifacts
+    object: "releases/{{ version }}/app.tar.gz"
+    src: /tmp/app.tar.gz
+    mode: put
+    region: us-east-1
+    encryption_mode: AES256
+    metadata:
+      version: "{{ version }}"
+  delegate_to: localhost
+
+- name: download
+  amazon.aws.s3_object:
+    bucket: my-artifacts
+    object: "releases/{{ version }}/app.tar.gz"
+    dest: /tmp/app.tar.gz
+    mode: get
+  delegate_to: localhost
+
+۹.۳ amazon.aws.iam_user / iam_role / iam_policy
+yaml
+
+- name: create IAM user
+  amazon.aws.iam_user:
+    name: deploy-bot
+    state: present
+  register: iam
+
+- name: attach policy
+  amazon.aws.iam_user:
+    name: deploy-bot
+    managed_policies: [arn:aws:iam::aws:policy/ReadOnlyAccess]
+    state: present
+
+🗄️ دسته ۱۰: Database
+۱۰.۱ community.mysql.mysql_user / mysql_db
+yaml
+
+- name: create database
+  community.mysql.mysql_db:
+    name: "{{ db_name }}"
+    state: present
+    login_user: root
+    login_password: "{{ vault_mysql_root }}"
+    login_unix_socket: /var/run/mysqld/mysqld.sock
+    encoding: utf8mb4
+    collation: utf8mb4_unicode_ci
+
+- name: create app user
+  community.mysql.mysql_user:
+    name: app
+    host: "%"
+    password: "{{ vault_db_password }}"
+    priv: "{{ db_name }}.*:SELECT,INSERT,UPDATE,DELETE"
+    state: present
+    login_user: root
+    login_password: "{{ vault_mysql_root }}"
+  no_log: true
+
+نکته امنیتی:
+
+    no_log: true روی password
+
+    priv دقیق (نه ALL PRIVILEGES)
+
+    host: "10.0.0.%" نه %
+
+۱۰.۲ community.postgresql.postgresql_user / postgresql_db
+yaml
+
+- name: create db
+  community.postgresql.postgresql_db:
+    name: app_db
+    owner: app
+    encoding: UTF-8
+    lc_collate: en_US.UTF-8
+    state: present
+  become: true
+  become_user: postgres
+
+- name: create user
+  community.postgresql.postgresql_user:
+    name: app
+    password: "{{ vault_pg_password }}"
+    db: app_db
+    priv: "CONNECT,CREATE"
+    role_attr_flags: NOSUPERUSER,NOCREATEDB,NOCREATEROLE
+  become: true
+  become_user: postgres
+  no_log: true
+
+🖥️ دسته ۱۱: وب سرور و Reverse Proxy
+۱۱.۱ Nginx (فقط با template — ماژول اختصاصی ندارد)
+yaml
+
+- name: install nginx
+  apt: { name: nginx, state: present, update_cache: yes }
+
+- name: deploy config
+  template:
+    src: nginx.conf.j2
+    dest: /etc/nginx/nginx.conf
+    mode: '0644'
+    validate: 'nginx -t -c %s'
+  notify: reload nginx
+
+- name: enable site
+  file:
+    src: /etc/nginx/sites-available/{{ site }}
+    dest: /etc/nginx/sites-enabled/{{ site }}
+    state: link
+    force: yes
+  notify: reload nginx
+
+handlers:
+  - name: reload nginx
+    systemd: { name: nginx, state: reloaded }
+
+۱۱.۲ community.general.apache2_module / apache2_site
+yaml
+
+- name: enable module
+  community.general.apache2_module:
+    name: rewrite
+    state: present
+  notify: reload apache
+
+- name: enable site
+  community.general.apache2_site:
+    name: default-ssl
+    state: present
+
+🗂️ دسته ۱۲: Git و Source Control
+۱۲.۱ ansible.builtin.git
+yaml
+
+git:
+  repo: https://github.com/org/repo.git
+  dest: /opt/app
+  version: "v{{ app_version }}"    # یا branch/tag/SHA
+  accept_hostkey: yes              # یا known_hosts از قبل
+  key_file: /root/.ssh/deploy_key
+  ssh_opts: "-o StrictHostKeyChecking=yes"
+  depth: 1                          # shallow → سریع‌تر
+  force: no
+  update: yes
+  umask: '0022'
+  refspec: "+refs/heads/*:refs/remotes/origin/*"
+
+مثال production:
+yaml
+
+- name: deploy code
+  git:
+    repo: "git@github.com:org/app.git"
+    dest: /opt/app
+    version: "{{ deploy_ref }}"
+    accept_hostkey: yes
+    key_file: /etc/ansible/keys/deploy
+    depth: 1
+  notify: restart app
+
+نکته: accept_hostkey: yes فقط با کلید pin در known_hosts امن است. بهتر: pre-populate known_hosts.
+📊 دسته ۱۳: سیستم و Kernel
+۱۳.۱ ansible.posix.sysctl
+yaml
+
+- name: tune kernel
+  ansible.posix.sysctl:
+    name: net.ipv4.tcp_syncookies
+    value: '1'
+    state: present
+    sysctl_file: /etc/sysctl.d/99-hardening.conf
+    reload: yes
+
+- name: vm tuning
+  ansible.posix.sysctl:
+    name: "{{ item.key }}"
+    value: "{{ item.value }}"
+    sysctl_set: yes
+    reload: yes
+  loop:
+    - { key: 'vm.swappiness', value: '10' }
+    - { key: 'vm.overcommit_memory', value: '1' }
+    - { key: 'net.core.somaxconn', value: '65535' }
+
+۱۳.۲ community.general.modprobe
+yaml
+
+- name: load kernel module
+  community.general.modprobe:
+    name: br_netfilter
+    state: present
+    persistent: present
+
+۱۳.۳ community.general.timezone
+yaml
+
+- timezone:
+    name: Asia/Tehran
+
+۱۳.۴ community.general.locale_gen
+yaml
+
+- community.general.locale_gen:
+    name: en_US.UTF-8
+    state: present
+
+💾 دسته ۱۴: Storage و Mount
+۱۴.۱ community.general.lvg / lvol / filesystem
+yaml
+
+- name: create VG
+  community.general.lvg:
+    vg: vg_data
+    pvs: /dev/sdb
+    state: present
+
+- name: create LV
+  community.general.lvol:
+    vg: vg_data
+    lv: lv_app
+    size: 50G
+    force: no
+
+- name: create fs
+  community.general.filesystem:
+    fstype: ext4
+    dev: /dev/vg_data/lv_app
+    opts: '-m 1'
+    force: no
+
+- name: mount
+  ansible.posix.mount:
+    path: /var/lib/app
+    src: /dev/vg_data/lv_app
+    fstype: ext4
+    opts: 'noatime,nodiratime'
+    state: mounted
+    dump: '0'
+    passno: '2'
+
+🔍 دسته ۱۵: Debug، Fact، Control Flow
+۱۵.۱ ansible.builtin.debug
+yaml
+
+- debug: { var: ansible_facts }
+- debug: { msg: "Version {{ app_version }}" }
+- debug: { var: result, verbosity: 2 }
+- debug:
+    msg: |
+      Host: {{ inventory_hostname }}
+      IP:   {{ ansible_default_ipv4.address }}
+      OS:   {{ ansible_distribution }} {{ ansible_distribution_version }}
+
+۱۵.۲ ansible.builtin.assert
+yaml
+
+- assert:
+    that:
+      - ansible_memtotal_mb >= 4096
+      - ansible_distribution == 'Ubuntu'
+      - app_version is defined
+      - app_version is match('^v[0-9]+\.[0-9]+\.[0-9]+$')
+    fail_msg: "Pre-flight checks failed"
+    success_msg: "All checks passed"
+    quiet: yes
+
+۱۵.۳ ansible.builtin.fail / pause
+yaml
+
+- fail: { msg: "Unsupported OS: {{ ansible_distribution }}" }
+  when: ansible_os_family not in ['Debian', 'RedHat']
+
+- pause:
+    prompt: "About to deploy {{ app_version }} to {{ env }}. Press Enter"
+    minutes: 5
+  when: env == 'production'
+
+۱۵.۴ ansible.builtin.wait_for / wait_for_connection
+yaml
+
+- name: wait for port
+  wait_for:
+    host: "{{ inventory_hostname }}"
+    port: 22
+    delay: 5
+    timeout: 300
+    search_regex: OpenSSH
+
+- name: wait for service
+  wait_for:
+    port: 8080
+    state: started
+    timeout: 60
+
+- name: wait for connection (after reboot)
+  wait_for_connection:
+    delay: 10
+    timeout: 300
+
+- name: wait for file content
+  wait_for:
+    path: /var/log/app.log
+    search_regex: "Server started"
+    timeout: 120
+
+۱۵.۵ ansible.builtin.include_tasks / import_tasks / include_vars
+yaml
+
+- import_tasks: tasks/install.yml        # static
+  tags: [install]
+
+- include_tasks: "tasks/{{ ansible_os_family }}.yml"  # dynamic
+  when: ansible_os_family in ['Debian', 'RedHat']
+
+- include_vars: "vars/{{ env }}.yml"
+
+- include_vars:
+    dir: vars/
+    extensions: ['yml', 'yaml']
+
+۱۵.۶ ansible.builtin.set_fact
+yaml
+
+- set_fact:
+    is_prod: "{{ env == 'production' }}"
+    cluster_nodes: "{{ groups['cluster'] | map('extract', hostvars, 'ansible_host') | list }}"
+
+- set_fact:
+    combined_config: "{{ default_config | combine(override_config, recursive=True) }}"
+
+- set_fact:
+    cacheable: yes        # ← برای fact cache
+
+۱۵.۷ ansible.builtin.service_facts / package_facts
+yaml
+
+- service_facts:
+
+- debug:
+    msg: "nginx is {{ ansible_facts.services['nginx.service']['state'] }}"
+  when: "'nginx.service' in ansible_facts.services"
+
+- package_facts:
+    manager: auto
+
+- debug:
+    msg: "nginx version: {{ ansible_facts.packages['nginx'][0]['version'] }}"
+
+۱۵.۸ ansible.builtin.meta
+yaml
+
+- meta: end_play                   # توقف کل play
+- meta: end_host                   # فقط این host
+- meta: flush_handlers             # اجرای فوری handlerها
+- meta: clear_facts                # پاک کردن factهای host
+- meta: refresh_inventory          # بازخوانی inventory
+- meta: reset_connection           # ریست اتصال SSH
+
+📡 دسته ۱۶: Notification
+۱۶.۱ community.general.slack
+yaml
+
+- community.general.slack:
+    token: "{{ vault_slack_token }}"
+    channel: "#deploys"
+    msg: |
+      ✅ Deploy completed
+      Version: {{ app_version }}
+      Environment: {{ env }}
+      Duration: {{ elapsed }}
+    color: good
+  delegate_to: localhost
+  no_log: true
+
+۱۶.۲ community.general.mail / community.general.mattermost
+yaml
+
+- community.general.mail:
+    host: smtp.internal
+    port: 587
+    to: ops@example.com
+    from: ansible@example.com
+    subject: "Deploy {{ app_version }} on {{ env }}"
+    body: "{{ lookup('template', 'email.j2') }}"
+    secure: starttls
+  delegate_to: localhost
+
+🪟 دسته ۱۷: Windows
+۱۷.۱ ansible.windows.win_package / win_service
+yaml
+
+- win_package:
+    path: C:\Temp\installer.msi
+    product_id: '{GUID}'
+    state: present
+    arguments: /S /D=C:\App
+
+- win_service:
+    name: MyService
+    state: started
+    start_mode: auto
+    username: DOMAIN\svc
+    password: "{{ vault_win_svc_pw }}"
+
+۱۷.۲ ansible.windows.win_copy / win_template / win_regedit
+yaml
+
+- win_copy:
+    src: files\config.xml
+    dest: C:\App\config.xml
+
+- win_template:
+    src: config.xml.j2
+    dest: C:\App\config.xml
+  notify: restart service
+
+- win_regedit:
+    path: HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters
+    name: EnableICMPRedirect
+    data: 0
+    type: dword
+
+نکته: تمام ماژول‌های Windows با پیشوند win_ یا ansible.windows.*.
+📶 دسته ۱۸: Network Devices
+۱۸.۱ cisco.ios.ios_config / ios_command
+yaml
+
+- cisco.ios.ios_config:
+    lines:
+      - ntp server 10.0.0.1
+      - logging host 10.0.0.2
+    parents: [line vty 0 4]
+    match: line
+    save_when: modified
+
+- cisco.ios.ios_command:
+    commands:
+      - show version
+      - show ip interface brief
+  register: output
+
+- debug: var=output.stdout_lines
+
+۱۸.۲ junipernetworks.junos.junos_config
+yaml
+
+- junipernetworks.junos.junos_config:
+    src: config/device.j2
+    backup: yes
+    rollback: 2
+
+نکته: برای همه network devices، ansible_connection: network_cli و ansible_network_os در inventory.
+🎯 دسته ۱۹: الگوهای Production ترکیبی
+۱۹.۱ Deploy کامل یک web service
+yaml
+
+- hosts: webservers
+  become: true
+  serial: [1, 5, "25%"]
+  max_fail_percentage: 10
+  vars:
+    app_version: "{{ deploy_version }}"
+
+  pre_tasks:
+    - name: pre-flight
+      assert:
+        that:
+          - ansible_os_family == "Debian"
+          - ansible_memtotal_mb >= 2048
+    - name: drain from LB
+      uri:
+        url: "http://lb/api/drain/{{ inventory_hostname }}"
+      delegate_to: localhost
+      changed_when: false
+
+  tasks:
+    - name: install deps
+      package: { name: [nginx, curl, python3-pip], state: present }
+
+    - name: deploy code
+      synchronize:
+        src: ./dist/
+        dest: /var/www/app/
+        delete: yes
+        checksum: yes
+      delegate_to: "{{ inventory_hostname }}"
+
+    - name: install requirements
+      pip:
+        requirements: /var/www/app/requirements.txt
+        virtualenv: /var/www/app/venv
+
+    - name: config
+      template:
+        src: app.conf.j2
+        dest: /etc/app/app.conf
+        mode: '0644'
+        validate: 'app -t -c %s'
+      notify: restart app
+
+    - name: app service
+      systemd:
+        name: app
+        state: started
+        enabled: yes
+
+    - name: health check
+      uri:
+        url: "http://{{ inventory_hostname }}/health"
+        status_code: 200
+      retries: 30
+      delay: 3
+      until: health.status == 200
+      register: health
+      changed_when: false
+
+    - name: re-enable in LB
+      uri:
+        url: "http://lb/api/enable/{{ inventory_hostname }}"
+      delegate_to: localhost
+
+  handlers:
+    - name: restart app
+      systemd: { name: app, state: restarted, daemon_reload: yes }
+
+۱۹.۲ Hardening سرور
+yaml
+
+- hosts: all
+  become: true
+
+  tasks:
+    - name: SSH hardening
+      template:
+        src: sshd_config.j2
+        dest: /etc/ssh/sshd_config
+        mode: '0600'
+        validate: 'sshd -t -f %s'
+      notify: restart sshd
+
+    - name: sysctl hardening
+      ansible.posix.sysctl:
+        name: "{{ item }}"
+        value: '1'
+        sysctl_file: /etc/sysctl.d/99-hardening.conf
+        reload: yes
+      loop:
+        - net.ipv4.tcp_syncookies
+        - net.ipv4.conf.all.rp_filter
+        - net.ipv4.conf.all.accept_redirects
+        - net.ipv4.ip_forward
+
+    - name: firewall
+      ansible.posix.firewalld:
+        service: "{{ item }}"
+        permanent: yes
+        state: enabled
+        immediate: yes
+      loop: [ssh, https]
+
+    - name: auditd
+      service:
+        name: auditd
+        state: started
+        enabled: yes
+
+    - name: disable unused services
+      systemd:
+        name: "{{ item }}"
+        state: stopped
+        enabled: no
+      loop: [telnet.socket, rsh.socket]
+      ignore_errors: yes
+
+۱۹.۳ Rolling cluster upgrade (Kubernetes)
+yaml
+
+- hosts: k8s-worker
+  serial: 1
+  any_errors_fatal: true
+
+  tasks:
+    - name: drain
+      kubernetes.core.k8s_drain:
+        node: "{{ inventory_hostname }}"
+        state: drain
+        ignore_daemonsets: yes
+        delete_emptydir_data: yes
+      delegate_to: "{{ groups['k8s-master'][0] }}"
+
+    - name: upgrade packages
+      dnf: { name: "kubeadm-1.29.0-*", state: present, allow_downgrade: no }
+
+    - name: upgrade node
+      command: kubeadm upgrade node
+      args: { creates: /var/lib/kubelet/.upgraded-1.29.0 }
+
+    - name: restart kubelet
+      systemd: { name: kubelet, state: restarted }
+
+    - name: uncordon
+      kubernetes.core.k8s_drain:
+        node: "{{ inventory_hostname }}"
+        state: uncordon
+      delegate_to: "{{ groups['k8s-master'][0] }}"
+
+    - name: wait ready
+      kubernetes.core.k8s_info:
+        kind: Node
+        name: "{{ inventory_hostname }}"
+      register: node
+      until: node.resources[0].status.conditions | selectattr('type','equalto','Ready') | map(attribute='status') | first == "True"
+      retries: 30
+      delay: 10
+      delegate_to: "{{ groups['k8s-master'][0] }}"
+
+⚠️ جدول انتخاب سریع ماژول
+کار	ماژول	دسته
+نصب پکیج (generic)	package	Package
+نصب پکیج (Debian)	apt	Package
+نصب پکیج (RHEL)	dnf	Package
+venv پایتون	pip	Package
+سرویس	systemd / service	Service
+فایل ثابت	copy	File
+فایل پویا	template	File
+تغییر خط	lineinfile	File
+تغییر block	blockinfile	File
+تغییر چندگانه	replace	File
+بررسی وجود	stat	File
+جستجوی فایل	find	File
+rsync	synchronize	File
+فشرده‌سازی	archive / unarchive	File
+user	user	User
+SSH key	authorized_key	User
+sudo	copy + validate	User
+SELinux boolean	seboolean	Security
+SELinux context	sefcontext + restorecon	Security
+Firewall (RHEL)	firewalld	Security
+Firewall (Ubuntu)	ufw	Security
+SSL cert	x509_certificate	Security
+Vault secret	vault_kv2_get	Security
+HTTP API	uri	Network
+دانلود فایل	get_url	Network
+Docker image	docker_image	Container
+Docker container	docker_container	Container
+Docker compose	docker_compose_v2	Container
+K8s resource	k8s	Container
+Helm chart	helm	Container
+AWS EC2	ec2_instance	Cloud
+AWS S3	s3_object	Cloud
+MySQL	mysql_user/mysql_db	Database
+PostgreSQL	postgresql_user/postgresql_db	Database
+Git	git	SCM
+sysctl	sysctl	System
+modprobe	modprobe	System
+timezone	timezone	System
+LVM	lvg/lvol	Storage
+Mount	mount	Storage
+Cron	cron	System
+debug	debug	Control
+assert	assert	Control
+fail	fail	Control
+pause	pause	Control
+wait_for	wait_for	Control
+include	include_tasks/import_tasks	Control
+set_fact	set_fact	Control
+service facts	service_facts	Facts
+package facts	package_facts	Facts
+meta	meta	Control
+Slack	slack	Notification
+Mail	mail	Notification
+Windows pkg	win_package	Windows
+Network device	ios_config/junos_config	Network
+🎓 اصول استفاده حرفه‌ای
+۱. FQCN همیشه
+yaml
+
+# ❌
+- copy: src=a dest=b
+
+# ✅
+- ansible.builtin.copy:
+    src: a
+    dest: b
+
+۲. validate در همه configهای حساس
+yaml
+
+validate: 'nginx -t -c %s'      # nginx
+validate: 'sshd -t -f %s'       # ssh
+validate: 'visudo -cf %s'       # sudoers
+validate: 'apachectl -t -f %s'  # apache
+validate: 'named-checkconf %s'  # bind
+
+۳. no_log روی هر چیز حساس
+yaml
+
+- community.mysql.mysql_user:
+    password: "{{ vault_db_pw }}"
+  no_log: true
+
+- uri:
+    url: "{{ api }}"
+    headers: { Authorization: "Bearer {{ token }}" }
+  no_log: true
+
+۴. register + until برای eventual consistency
+yaml
+
+- uri:
+    url: "http://localhost/health"
+  register: r
+  until: r.status == 200
+  retries: 30
+  delay: 3
+
+۵. changed_when: false روی read-only
+yaml
+
+- command: systemctl is-active nginx
+  register: nginx_active
+  changed_when: false
+  failed_when: nginx_active.rc != 0
+
+۶. delegate_to برای LB/DNS/API
+yaml
+
+- uri:
+    url: "http://lb/api/drain/{{ inventory_hostname }}"
+  delegate_to: localhost
+  run_once: false
+
+۷. serial + max_fail_percentage
+yaml
+
+- hosts: cluster
+  serial: [1, 5, "25%"]
+  max_fail_percentage: 10
+
+۸. atomic در helm/k8s
+yaml
+
+- kubernetes.core.helm:
+    atomic: yes
+    wait: yes
+
+۹. backup: yes در تغییرات فایل سیستم
+yaml
+
+- copy: { backup: yes }
+- lineinfile: { backup: yes }
+
+۱۰. assert preflight
+yaml
+
+- assert:
+    that:
+      - ansible_os_family in ['Debian', 'RedHat']
+      - ansible_memtotal_mb >= 4096
+

@@ -1,0 +1,683 @@
+﻿🔧 توضیح خط‌به‌خط تمام تنظیمات ansible.cfg + توصیه‌های امنیتی محیط عملیاتی
+
+    این راهنما هر دایرکتیو را با فرمت: عملکرد → مقادیر مجاز → تأثیر امنیتی → توصیه Production پوشش می‌دهد.
+
+🧭 مقدمه: چرا این فایل حساس است؟
+
+ansible.cfg مرکز کنترل رفتار Ansible است. یک تنظیم اشتباه می‌تواند:
+
+    🔓 اعتبارنامه‌ها را در لاگ‌ها لو بدهد (log_path, no_log)
+
+    🚪 از تأیید هویت SSH عبور کند (host_key_checking)
+
+    ⚡ به‌طور غیرمنتظره روی همه هاست‌ها اجرا شود (forks, serial)
+
+    🔑 کلیدهای خصوصی را در محل ناامن ذخیره کند (private_key_file)
+
+    📜 اجرای untrusted plugin را ممکن کند (*_plugins)
+
+📄 بخش [defaults]
+🔹 inventory
+
+عملکرد: مسیر یا لیست کامایی مسیرهای فایل/دایرکتوری inventory.
+مقادیر: مسیر مطلق/نسبی؛ می‌توان دایرکتوری داد (همه فایل‌های داخل اسکن می‌شوند).
+امنیتی: اگر مسیر به دایرکتوری world-writable اشاره کند، مهاجم می‌تواند inventory جعلی جایگزین کند و دستورات را به سرور مخرب بفرستد.
+Production: inventory = /etc/ansible/inventory با chmod 750 و مالکیت root:ansible, chmod 640 روی فایل‌ها.
+🔹 inventory_ignore_extensions
+
+عملکرد: پسوندهایی که هنگام اسکن دایرکتوری inventory نادیده گرفته می‌شوند.
+مقدار پیش‌فرض: .pyc, .pyo, .swp, .bak, ~, .rpm, .md, .txt, .rst, .orig, .ini, .cfg, .retry
+امنیتی: از بارگذاری ناخواسته فایل‌های backup با اطلاعات حساس جلوگیری می‌کند.
+Production: همان پیش‌فرض کافی است؛ در صورت استفاده از vault فایل‌ها، پسوند رمزنگاری‌شده را اضافه نکن.
+🔹 inventory_ignore_patterns
+
+عملکرد: regex برای نادیده گرفتن فایل‌های inventory.
+پیش‌فرض: ^\. | ~$ | \.ini$
+Production: پیش‌فرض.
+🔹 inventory_unparsed_failed
+
+عملکرد: اگر فایل inventory قابل parse نباشد، خطا بدهد یا نادیده بگیرد.
+مقادیر: True / False
+امنیتی: False می‌تواند یک inventory خراب/دستکاری‌شده را بی‌صدا رد کند → خطر.
+Production: True — شکست سریع (fail fast) بهتر از اجرای ناقص است.
+🔹 remote_user
+
+عملکرد: کاربر پیش‌فرض SSH روی هاست هدف.
+پیش‌فرض: (بدون مقدار) → از کاربر جاری استفاده می‌شود.
+امنیتی: root مستقیم = نقض least-privilege. اگر کلید کاربر نشت کند، روت در اختیار مهاجم است.
+Production: کاربر غیر‌روت (deploy, ansible) + become: true تنها در taskهای نیازمند.
+🔹 remote_port
+
+عملکرد: پورت SSH پیش‌فرض.
+پیش‌فرض: 22
+Production: روی سرورهای حساس از پورت غیر‌استاندارد استفاده کن (تغییر به 2222 یا مشابه — دفاع لایه‌ای، نه امنیت واقعی) و در inventory هر هاست override کن.
+🔹 transport
+
+عملکرد: روش اتصال.
+مقادیر: smart (پیش‌فرض، OpenSSH در صورت وجود)، ssh, paramiko, local
+امنیتی: smart بهترین (از OpenSSH سیستم استفاده می‌کند که آپدیت امنیتی جداگانه می‌گیرد). paramiko کتابخانه Python است با سطح حمله جداگانه.
+Production: smart یا صریحاً ssh. از paramiko مگر در نیاز خاص اجتناب کن.
+🔹 ask_pass
+
+عملکرد: پرسیدن رمز SSH هنگام اتصال.
+پیش‌فرض: False
+Production: False — در اتوماسیون رمز SSH ممنوع؛ فقط کلید.
+🔹 ask_sudo_pass / ask_su_pass
+
+عملکرد: پرسیدن رمز become هنگام اجرا.
+Production: False در اتوماسیون؛ اما become_ask_pass=True در محیط‌های حساس می‌تواند لایه دفاعی باشد (جلوگیری از اجرای ناخواسته با sudo).
+🔹 host_key_checking ⚠️ حیاتی
+
+عملکرد: بررسی fingerprint هاست SSH هنگام اتصال (معادل StrictHostKeyChecking).
+پیش‌فرض: True (در نسخه‌های جدید)
+امنیتی: False = آسیب‌پذیر به MITM — مهاجم در شبکه می‌تواند خود را جای سرور جا بزند.
+Production: True و مدیریت known_hosts مرکزی:
+ini
+
+host_key_checking = True
+
+همراه با:
+
+    ssh_common_args = -o StrictHostKeyChecking=accept-new فقط برای اولین اتصال
+
+    توزیع known_hosts از طریق CM (Puppet/Chef) یا دستی
+
+    یا استفاده از UserKnownHostsFile و ssh_known_hosts
+
+راه‌حل جایگزین: استفاده از CA امضای کلید SSH (HostCertificate) برای اعتبارسنجی مقیاس‌پذیر.
+🔹 timeout
+
+عملکرد: timeout اتصال SSH (ثانیه).
+پیش‌فرض: 10
+Production: 10-30 بسته به شبکه. خیلی کم = شکست نادرست، خیلی زیاد = کندی در تشخیص خطا.
+🔹 forks
+
+عملکرد: تعداد هاست‌هایی که موازی task اجرا می‌کنند.
+پیش‌فرض: 5
+امنیتی: مقدار بالا → فشار ناگهانی روی سرورهای هدف (thundering herd) و پنجره انفجار خطا. مقدار پایین → کندی.
+Production: 20-50 برای اکثر محیط‌ها. برای تغییرات پرخطر مثل restart روی cluster، forks=1 یا serial استفاده کن:
+yaml
+
+- hosts: cluster
+  serial: 1
+
+🔹 poll_interval
+
+عملکرد: فاصله polling برای کارهای async.
+پیش‌فرض: 15 ثانیه.
+Production: 5-15 برای کارهای حساس.
+🔹 gathering
+
+عملکرد: چه زمانی fact جمع شود.
+مقادیر: implicit (پیش‌فرض)، explicit (فقط با gather_facts: yes)، smart (فقط اگر cache expire شده)
+Production: smart + fact_caching = jsonfile — کاهش شدید سربار network/setup روی هاست‌های زیاد.
+🔹 gather_subset
+
+عملکرد: کدام دسته‌های fact جمع شوند.
+پیش‌فرض: all
+Production: برای سرعت و کاهش سطح حمله (کمتر خواندن از /proc و اجرای دستورات سیستمی):
+ini
+
+gather_subset = min,network,virtual
+
+یا حذف subset گران:
+ini
+
+gather_subset = "!hardware,!facter,!ohai"
+
+🔹 gather_timeout
+
+عملکرد: timeout جمع‌آوری fact.
+Production: 10-30. اگر setup را روی هاست کند اجرا می‌کنی، افزایش بده؛ اما خیلی زیاد = تشخیص دیرتر هاست‌های از دست رفته.
+🔹 inject_facts_as_vars
+
+عملکرد: آیا ansible_facts['x'] به‌صورت flat ansible_x هم در دسترس باشد.
+پیش‌فرض: True
+امنیتی: اگر False شود، از تصادم نام‌ها و override ناخواسته فکت‌ها جلوگیری می‌شود (مثلاً یک group_vars/all.yml که ansible_distribution را تعریف کند = خطر).
+Production: False در پروژه‌های بزرگ/collectionها. توجه: collectionهای جدید بر ansible_facts[...] تأکید دارند.
+🔹 jinja2_extensions
+
+عملکرد: افزونه‌های Jinja2 فعال.
+پیش‌فرض: jinja2.ext.do,jinja2.ext.loopcontrols
+امنیتی: do امکان اجرای side-effect در template می‌دهد (کم‌خطر). loopcontrols (break/continue) بی‌خطر.
+Production: همان پیش‌فرض. هرگز Jinja2 sandbox را دور نزن.
+🔹 jinja2_native
+
+عملکرد: استفاده از انواع بومی Python در Jinja2 (bool, int).
+پیش‌فرض: False (در نسخه‌های قدیمی) → True در جدیدها
+Production: True برای رفتار طبیعی when: my_bool — از باگ‌های رایج "false" رشته‌ای جلوگیری می‌کند.
+🔹 allow_unsafe_lookups
+
+عملکرد: اجازه به lookupهای ناامن (مثل pipe بدون unsafe_writes).
+پیش‌فرض: False
+Production: False — امن. pipe در Jinja2 = اجرای دستور shell از یک متغیر — خطر RCE.
+🔹 error_on_undefined_vars
+
+عملکرد: خطا اگر متغیری undefined باشد.
+پیش‌فرض: True
+Production: True — از رفتار عجیب با None/رشته خالی جلوگیری می‌کند.
+🔹 log_path ⚠️
+
+عملکرد: مسیر فایل لاگ اجرای playbook.
+پیش‌فرض: (خالی)
+امنیتی: لاگ‌ها ممکن است رمز، کلید، توکن، محتوای فایل‌های حساس داشته باشند اگر no_log نباشد.
+Production: /var/log/ansible.log با:
+bash
+
+chown ansible:adm /var/log/ansible.log
+chmod 640 /var/log/ansible.log
+logrotate با retention 30-90 روز
+
+همیشه no_log: true روی taskهای حساس + no_log: true در کلید passwords در loop:
+yaml
+
+- name: set password
+  user:
+    name: "{{ item.name }}"
+    password: "{{ item.pw | password_hash('sha512') }}"
+  loop: "{{ users }}"
+  no_log: true
+
+🔹 no_log
+
+عملکرد: سراسری خاموش‌کردن نمایش ورودی/خروجی task.
+پیش‌فرض: False
+Production: False (چون debug را کور می‌کند)، اما no_log: true روی taskهای حساس.
+🔹 display_skipped_hosts / display_ok_hosts / display_failed_stderr
+
+عملکرد: کنترل نمایش خروجی.
+Production: display_failed_stderr = True (خطا به stderr → parse آسان‌تر در CI)، بقیه پیش‌فرض.
+🔹 show_custom_stats
+
+عملکرد: نمایش آمار set_stats.
+Production: True در CI، False در محیط دستی.
+🔹 show_task_path_on_failure
+
+عملکرد: نمایش مسیر فایل task در خطا.
+Production: True — دیباگ سریع‌تر.
+🔹 stdout_callback
+
+عملکرد: فرمت خروجی.
+مقادیر: default, minimal, oneline, yaml, json, dense, debug, selective
+Production: yaml برای خوانایی، json در CI/CD، یا callback ansible.posix.debug برای debug.
+🔹 callback_whitelist (یا callbacks_enabled در جدید)
+
+عملکرد: callbackهای فعال.
+Production: profile_tasks, timer, mail, junit — junit برای CI، profile_tasks برای بهینه‌سازی.
+🔹 bin_ansible_callbacks
+
+عملکرد: فعال‌سازی callback برای دستورات غیر-playbook (ansible, ansible-console).
+Production: False (پیش‌فرض).
+🔹 deprecation_warnings, command_warnings, system_warnings, localhost_warning, action_warnings
+
+عملکرد: نمایش هشدارها.
+Production: همه True — هشدارها باگ‌های آینده را نشان می‌دهند.
+🔹 allow_world_readable_tmpfiles ⚠️
+
+عملکرد: اجازه به فایل‌های temp با دسترسی world-readable.
+پیش‌فرض: False
+امنیتی: True = فاجعه — secrets ممکن است خوانده شوند.
+Production: False. اگر نیاز شد (become با کاربر بدون pam)، از remote_tmp اختصاصی و become_user استفاده کن.
+🔹 sudo_flags
+
+عملکرد: فلگ‌های پیش‌فرض sudo.
+پیش‌فرض: -H -S -n
+
+    -H: HOME را به کاربر هدف ست کن (root)
+
+    -S: خواندن رمز از stdin
+
+    -n: بدون prompt
+    Production: همان پیش‌فرض. در sudoers:
+
+text
+
+Defaults env_reset
+Defaults secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Defaults !visiblepw
+Defaults requiretty   # (اگر pipelining لازم داری، این را نگذار)
+
+🔹 hash_behaviour ⚠️
+
+عملکرد: رفتار merge متغیرهای dict.
+مقادیر: replace (پیش‌فرض، dict کامل جایگزین می‌شود)، merge (recursive merge)
+امنیتی: merge می‌تواند باعث شود مقدار پیش‌فرض امن یک dict بازنویسی نشود یا بازنویسی شود به شکل غیرمنتظره — منبع باگ‌های امنیتی.
+Production: replace (پیش‌فرض). برای merge کنترل‌شده از فیلتر combine(recursive=True, list_merge='append') استفاده کن.
+🔹 retry_files_enabled / retry_files_save_path
+
+عملکرد: ذخیره هاست‌های failed برای اجرای بعدی (.retry).
+Production: retry_files_enabled = True, retry_files_save_path = ~/.ansible/retry/ — مفید در ops.
+🔹 interpreter_python / ansible_python_interpreter
+
+عملکرد: انتخاب مفسر Python روی هاست هدف.
+مقادیر: auto (تشخیص)، auto_silent, auto_legacy, مسیر صریح.
+Production: مسیر صریح /usr/bin/python3 در inventory/vars — جلوگیری از استفاده ناخواسته /usr/bin/python قدیمی یا interpreter مخرب.
+🔹 ansible_managed
+
+عملکرد: رشته‌ای که در تمپلیت‌ها {{ ansible_managed }} نشان می‌دهد.
+Production: شامل زمان، کاربر، و هشدار “do not edit manually”.
+🔹 library, module_utils, roles_path, collections_path, *_plugins
+
+عملکرد: مسیرهای جستجوی plugin/role/collection.
+امنیتی: ⚠️ pluginها = کد اجرایی. اگر مسیری world-writable یا در HOME کاربر باشد که مهاجم کنترل کند، RCE مستقیم روی control node.
+Production:
+ini
+
+library            = /usr/share/ansible/plugins/modules
+roles_path         = /etc/ansible/roles:/usr/share/ansible/roles
+collections_path   = /etc/ansible/collections:/usr/share/ansible/collections
+action_plugins     = /usr/share/ansible/plugins/action
+callback_plugins   = /usr/share/ansible/plugins/callback
+...
+
+همه مسیرها:
+bash
+
+chown -R root:root /etc/ansible
+chmod -R 755 /etc/ansible
+find /etc/ansible -type f -exec chmod 644 {} \;
+
+هرگز HOME کاربر یا /tmp را در مسیر plugin نگذار.
+🔹 command_warnings
+
+عملکرد: هشدار هنگام استفاده از command/shell بدون creates/removes.
+Production: True — تشویق به idempotency.
+🔹 collections_on_ansible_version_mismatch
+
+عملکرد: رفتار وقتی collection با نسخه ansible سازگار نیست.
+مقادیر: warning, error, ignore
+Production: error — جلوگیری از اجرای collection ناسازگار در محیط حساس.
+🔹 INTERPRETER_PYTHON_FALLBACK
+
+عملکرد: لیست fallback برای interpreter.
+Production: فقط مسیرهای trusted:
+ini
+
+INTERPRETER_PYTHON_FALLBACK = /usr/bin/python3
+
+🔒 بخش [privilege_escalation]
+🔹 become
+
+عملکرد: فعال‌سازی پیش‌فرض privilege escalation.
+Production: False سراسری، True در playbook/task فقط وقتی لازم است:
+yaml
+
+- hosts: all
+  become: true    # explicit
+
+🔹 become_method
+
+مقادیر: sudo, su, pbrun, pfexec, doas, dzdo, ksu, runas, machinectl, sudo
+Production: sudo همیشه.
+🔹 become_user
+
+پیش‌فرض: root
+Production: حداقل دسترسی:
+yaml
+
+- name: task specific user
+  become: true
+  become_user: postgres
+
+🔹 become_ask_pass
+
+Production: False در اتوماسیون، True در حساس‌ترین محیط‌ها (انسان در حلقه).
+🔹 become_exe / become_flags
+
+Production: پیش‌فرض. become_flags = -H -S -n هرگز -E (نگه‌داشتن env) اضافه نکن — نشت secret.
+🌐 بخش [ssh_connection]
+🔹 pipelining ⚡
+
+عملکرد: ارسال task به stdin بدون فایل temp روی مقصد.
+پیش‌فرض: False (بدلیل سازگاری)
+Production: True برای سرعت و امنیت (کاهش نوشتن روی دیسک).
+پیش‌نیاز: Defaults !requiretty در sudoers یا become_method = sudo با sudo -n؛ و requiretty در /etc/sudoers نباشد.
+امنیتی: کاهش سطح حمله (فایل temp روی دیسک هدف).
+🔹 pipelining_async
+
+Production: True (در نسخه‌های جدید).
+🔹 ssh_args ⚠️
+
+عملکرد: آرگومان‌های پیش‌فرض ssh.
+پیش‌فرض: -C -o ControlMaster=auto -o ControlPersist=60s -o PreferredAuthentications=publickey
+Production امن:
+ini
+
+ssh_args = -C -o ControlMaster=auto -o ControlPersist=300s -o PreferredAuthentications=publickey -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no -o ChallengeResponseAuthentication=no -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/ssh/ssh_known_hosts -o ConnectTimeout=15 -o ServerAliveInterval=30
+
+امنیتی:
+
+    PasswordAuthentication=no → فقط کلید
+
+    PreferredAuthentications=publickey → جلوگیری از downgrade به رمز
+
+    StrictHostKeyChecking=yes → ضد MITM
+
+    ControlPersist = 300s → کاهش overhead handshake (سرعت)، اما سوکت‌ها محافظت شوند (chmod 700 مسیر control_path)
+
+🔹 ssh_executable
+
+Production: /usr/bin/ssh (مسیر صریح، جلوگیری از PATH hijack).
+🔹 ssh_common_args
+
+عملکرد: آرگومان مشترک بین ssh/scp/sftp.
+Production:
+ini
+
+ssh_common_args = -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/ssh/ssh_known_hosts
+
+🔹 ssh_extra_args
+
+Production: -o ControlMaster=auto -o ControlPersist=300s.
+🔹 control_path / control_path_dir ⚠️
+
+پیش‌فرض: %(directory)s/ansible-ssh-%%h-%%p-%%r
+امنیتی: سوکت‌های ControlMaster = دسترسی کامل SSH. اگر world-readable باشند، مهاجم محلی می‌تواند به session سواری کند.
+Production:
+ini
+
+control_path_dir = ~/.ansible/cp
+
+و:
+bash
+
+chmod 700 ~/.ansible/cp
+
+🔹 scp_if_ssh / sftp_batch_mode / ssh_transfer_method
+
+عملکرد: روش انتقال فایل.
+مقادیر: smart, sftp, scp, piped, dd
+Production: piped امن‌ترین (بدون فایل temp روی مقصد) — در جدید ssh_transfer_method = piped.
+اگر سازگاری لازم: sftp + sftp_batch_mode = True.
+🔹 retries / ssh_retries
+
+Production: retries = 0 (اجازه به playbook برای مدیریت)، ssh_retries = 2.
+🔹 use_ssh_args (منسوخ)
+
+Production: False (منسوخ، از ssh_common_args استفاده کن).
+🔌 بخش [persistent_connection] (شبکه‌ای)
+🔹 connection_timeout, connect_timeout, command_timeout
+
+Production: 30-60 ثانیه — timeout کوتاه = قطع ناگهانی روی شبکه کند؛ طولانی = تشخیص دیرتر.
+امنیتی: timeout بلند → session معلق، ریسک session hijack.
+🔹 ansible_connection_path, control_path_dir
+
+Production: /usr/local/bin, ~/.ansible/pc با chmod 700.
+🎨 بخش [colors]
+
+عملکرد: فقط نمایش. امنیتی: بی‌خطر. تولید: پیش‌فرض یا خاموش در لاگ (nocolor).
+📊 بخش [diff]
+🔹 always
+
+عملکرد: نمایش diff در همه taskهای تغییردهنده.
+امنیتی: diff ممکن است secretها را نشان دهد اگر no_log نباشد.
+Production: False (فقط --diff دستی برای دیباگ). context = 3.
+🌌 بخش [galaxy]
+🔹 server / server_list
+
+Production: فقط سرور داخلی (Automation Hub، Artifactory، Nexus) — هرگز galaxy.ansible.com مستقیم در محیط بسته.
+🔹 ignore_certs ⚠️
+
+Production: False. True = آسیب‌پذیر به MITM نصب role/collection.
+🔹 role_skeleton / role_skeleton_ignore
+
+Production: همان پیش‌فرض.
+🔹 display_progress
+
+Production: True در CI، False در سرور batched.
+🔹 timeout
+
+عملکرد: timeout دانلود (ثانیه). Production: 60.
+📦 بخش [inventory]
+🔹 enable_plugins
+
+پیش‌فرض: host_list, script, auto, yaml, ini, toml
+امنیتی: ⚠️ پلاگین script = اجرای فایل‌های inventory اجرایی. اگر مسیر inventory شامل اسکریپت مهاجم باشد، RCE روی control node.
+Production: فهرست صریح:
+ini
+
+enable_plugins = yaml, ini
+
+و پلاگین‌های ابری که لازم داری (amazon.aws.aws_ec2, azure.azcollection.azure_rm, google.cloud.gcp_compute) — script و auto را حذف کن اگر استفاده نمی‌کنی.
+🔹 ignore_extensions / ignore_patterns
+
+Production: پیش‌فرض.
+🔹 unparsed_is_failed
+
+Production: True.
+🔐 بخش [paramiko_connection] (اگر استفاده شود)
+🔹 host_key_auto_add ⚠️
+
+Production: False — هرگز auto-add نکن (MITM).
+🔹 look_for_keys
+
+Production: True (استفاده از SSH agent) اما با کلیدهای محافظت‌شده.
+🔹 pty
+
+Production: True (توصیه).
+🔹 record_host_keys ⚠️
+
+Production: True — ذخیره و تأیید fingerprint.
+🔹 proxy_command
+
+عملکرد: پرش از یک jump host. امنیتی: اگر به درستی پیکربندی نشود، می‌تواند مسیر را از یک میزبان نامطمئن عبور دهد. Production: مسیر امن (Bastion با تأیید هویت).
+🪟 بخش [winrm] (مدیریت ویندوز)
+🔹 scheme
+
+Production: https همیشه. http = رمز plaintext.
+🔹 transport
+
+مقادیر: plaintext, kerberos, ntlm, credssp
+Production: kerberos (ادغام AD، بدون انتقال رمز) > ntlm > credssp (فقط برای delegated auth) > plaintext (هرگز).
+🔹 server_cert_validation
+
+Production: validate. ignore = MITM.
+🔹 kerberos_delegation
+
+Production: False مگر لازم (delegation خطرناک).
+🔹 read_timeout_sec / operation_timeout_sec
+
+Production: 30 / 20.
+🔹 connection_timeout
+
+Production: 30.
+🌐 بخش [url_lookup]
+🔹 validate_certs ⚠️
+
+Production: True (پیش‌فرض). False = MITM در download محتوا.
+🔹 timeout: 10-30.
+🗝️ بخش [vault] (در نسخه‌های جدید)
+🔹 vault_password_file / vault_id_match
+
+عملکرد: مسیر فایل رمز vault.
+Production: استفاده از --vault-password-file به‌جای ذخیره در ansible.cfg (جلوگیری از leak در git). یا استفاده از vault-id با اسکریپت (مثلاً --vault-id prod@vault-client.py که از HashiCorp Vault رمز را می‌گیرد):
+ini
+
+[defaults]
+vault_password_file = 
+# خالی بگذار، از اسکریپت/CLI استفاده کن
+
+امنیتی:
+
+    ❌ ansible.cfg هرگز رمز vault را نباید داشته باشد
+
+    ✅ chmod 600 روی .vault_pass
+
+    ✅ استفاده از vault-id چندگانه (dev/prod)
+
+    ✅ اسکریپت vault_password_client که از AWS Secrets Manager / HashiCorp Vault می‌خواند
+
+    ✅ ANSIBLE_VAULT_PASSWORD_FILE در محیط runtime (نه در shell history)
+
+🧾 بخش [logging] (در نسخه‌های جدید)
+🔹 log_path — همان بالا.
+🔹 log_level
+
+مقادیر: DEBUG, INFO, WARNING, ERROR
+Production: INFO — DEBUG می‌تواند secretها را log کند.
+📚 بخش [persistent_connection] (برای شبکه)
+
+Production:
+
+    control_path_dir با chmod 700
+
+    connection_timeout 60
+
+    command_timeout 60
+
+🎯 چک‌لیست امنیتی نهایی محیط Production
+✅ الزامات (Must)
+ini
+
+[defaults]
+host_key_checking       = True
+allow_world_readable_tmpfiles = False
+inventory_unparsed_failed = True
+error_on_undefined_vars = True
+allow_unsafe_lookups    = False
+inject_facts_as_vars    = False
+hash_behaviour          = replace
+retry_files_enabled     = True
+log_path                = /var/log/ansible.log
+show_task_path_on_failure = True
+stdout_callback         = yaml
+interpreter_python      = /usr/bin/python3
+ansible_python_interpreter = /usr/bin/python3
+
+[privilege_escalation]
+become                  = False
+become_method           = sudo
+become_user             = root
+become_flags            = -H -S -n
+
+[ssh_connection]
+pipelining              = True
+ssh_args                = -C -o ControlMaster=auto -o ControlPersist=300s -o PreferredAuthentications=publickey -o PasswordAuthentication=no -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/ssh/ssh_known_hosts -o ConnectTimeout=15
+control_path_dir        = ~/.ansible/cp
+ssh_transfer_method     = piped
+scp_if_ssh              = False
+
+[galaxy]
+server                  = https://automation-hub.internal.example.com/api/galaxy/
+ignore_certs            = False
+
+✅ توصیه‌ها (Should)
+
+    collections_on_ansible_version_mismatch = error
+
+    callbacks_enabled = profile_tasks, junit, timer
+
+    command_warnings = True
+
+    gathering = smart
+
+    gather_subset = min,network,virtual
+
+    fact_caching = jsonfile + fact_caching_timeout = 7200
+
+    callback_whitelist شامل junit برای CI
+
+❌ ضدالگوها (Never)
+تنظیم	چرا خطرناک
+host_key_checking = False	MITM
+allow_world_readable_tmpfiles = True	نشت secret
+become_ask_pass = False در محیط حساس	اجرای خودکار sudo بدون تأیید
+pipelining = False (روی هاست‌های سازگار)	کندی + فایل temp روی مقصد
+galaxy ignore_certs = True	MITM
+winrm scheme = http	رمز plaintext
+winrm transport = plaintext	رمز plaintext
+paramiko host_key_auto_add = True	MITM
+hash_behaviour = merge	override غیرمنتظره
+log_path با دسترسی world-readable	نشت اطلاعات
+رمز vault داخل ansible.cfg	leak در git
+plugin/role path در /tmp یا $HOME	RCE
+enable_plugins شامل script بدون کنترل	RCE
+forks خیلی بالا	thundering herd
+remote_user = root	نقض least-privilege
+🛡️ لایه‌بندی امنیتی اطراف Ansible (فراتر از ansible.cfg)
+
+    جداسازی control node:
+
+        کاربر ansible با sudo محدود (whitelist دستورات یا passwordless برای sudo مؤثر)
+
+        ansible.cfg در /etc/ansible/ansible.cfg با chmod 644, مالکیت root:root
+
+        سرویس اجراکننده (AWX/AAP) در container/VM جدا
+
+    SSH CA:
+
+        HostCertificate با CA داخلی برای known_hosts مقیاس‌پذیر
+
+        AuthorizedPrincipalsFile برای کنترل دقیق کاربر/هاست
+
+    Vault مدیریت‌شده:
+
+        HashiCorp Vault / AWS Secrets Manager برای vault password
+
+        vault-id چندگانه dev/prod/staging
+
+    Signing playbooks:
+
+        GPG signing commitهای repo
+
+        اجرای فقط از branch/tag تأییدشده در CI
+
+    Collection provenance:
+
+        galaxy_signature + requirements.yml pin به version SHA
+
+        mirror داخلی با اسکن امنیتی (مثلاً ansible-lint)
+
+    Audit و Monitoring:
+
+        log_path به SIEM (rsyslog → Wazuh/Splunk)
+
+        هشدار روی become غیرمنتظره، shell بدون creates, command بدون no_log روی رمز
+
+    Least-privilege در sudoers:
+
+text
+
+ansible ALL=(root) NOPASSWD: /usr/bin/systemctl, /usr/bin/apt, /usr/bin/dnf
+Defaults:ansible !requiretty
+Defaults:ansible env_reset
+Defaults:ansible secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+    پایش فایل کانفیگ:
+
+        auditd روی /etc/ansible/ansible.cfg
+
+        git-backed + pre-commit hook (نه تغییر دستی)
+
+📖 دستورهای مفید برای audit کانفیگ
+bash
+
+# نمایش کل کانفیگ مؤثر
+ansible-config dump --only-changed
+
+# بررسی منبع هر مقدار
+ansible-config dump --only-changed -t all
+
+# نمایش فایل ansible.cfg مؤثر
+ansible-config view
+
+# لیست همه کلیدها + توضیح + مقدار پیش‌فرض
+ansible-config list
+
+# فقط یک بخش
+ansible-config dump | grep -i ssh_
+
+🎓 نتیجه‌گیری
+
+    ansible.cfg = سطح حمله مستقیم. تغییرات باید در version control + review باشند.
+
+    سه اصل طلایی:
+
+        host_key_checking = True و مدیریت known_hosts مرکزی
+
+        pipelining = True با StrictHostKeyChecking=yes و فقط کلید
+
+        حداقل‌سازی مسیرهای plugin/roles و جداسازی secrets از فایل config
+
+    هر تغییر در production باید در محیط staging تست شود و در git commit با پیام امنیتی ثبت شود.
+

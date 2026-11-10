@@ -1,0 +1,2335 @@
+﻿🔗 ارتباط Ansible و Terraform — راهنمای جامع برای DevOps و Infrastructure Engineers
+
+    مرجع کامل درباره همکاری، تفکیک مسئولیت، الگوهای یکپارچه‌سازی، و پیاده‌سازی production بین Ansible (مدیریت config و پیکربندی) و Terraform (provisioning زیرساخت).
+
+📑 فهرست
+text
+
+۱.  چرا هر دو؟ تفاوت بنیادین
+۲.  مدل ذهنی Provisioning vs Configuration
+۳.  الگوهای معماری (۴ الگوی اصلی)
+۴.  Terraform → Ansible (state، output، inventory)
+۵.  Ansible → Terraform (نصب، اجرا، مدیریت state)
+۶.  ماژول community.general.terraform
+۷.  Terraform provider برای Ansible
+۸.  الگوی Local-exec + Ansible
+۹.  الگوی Cloud-init + Ansible
+۱۰. الگوی User Data + Ansible pull
+۱۱. الگوی Dynamic Inventory از Terraform State
+۱۲. Terraform CloudEnterprise + Ansible
+۱۳. Atlantis + Ansible
+۱۴. Terragrunt + Ansible
+۱۵. مثال کامل AWS (VPC + EC2 + Config)
+۱۶. مثال کامل Azure (VM + Config)
+۱۷. مثال کامل GCP
+۱۸. مثال کامل On-prem (vSphere)
+۱۹. مثال کامل Kubernetes (EKS + Apps)
+۲۰. CICD pipeline کامل
+۲۱. State management و secrets
+۲۲. Drift detection
+۲۳. Rollback و disaster recovery
+۲۴. Anti-patterns
+۲۵. Best practices
+۲۶. مقایسه ابزارهای جایگزین
+
+۱️⃣ چرا هر دو؟ تفاوت بنیادین
+تعریف کوتاه
+ابزار	نقش	زبان	State
+Terraform	ساختتغییرحذف زیرساخت	HCL	Stateful (.tfstate)
+Ansible	پیکربندی سیستم‌های موجود	YAML	Stateless (idempotent)
+تفاوت عمیق
+ویژگی	Terraform	Ansible
+فلسفه	Declarative infrastructure	ImperativeDeclarative config
+State	فایل state (منبع حقیقت)	بدون state
+Idempotency	State-based	Module-based
+Drift detection	با terraform plan	با --check
+Rollback	Manual (state surgery)	Manual (rerun playbook)
+Lifecycle	CreateUpdateDestroy	فقط config
+Scope	VPC, VM, DB, DNS, LB	OS, apps, services, config
+زبان	HCL (declarative)	YAML (imperative)
+Agent	ندارد (API)	ندارد (SSHAPI)
+State management	Critical	Non-issue
+Destroy	✅ بومی	❌ (فقط config)
+چرا نمی‌توان یکی را جایگزین دیگری کرد؟
+Terraform نمی‌تواند
+
+    نصب nginx روی EC2
+
+    config کردن etcnginxnginx.conf
+
+    restart سرویس
+
+    rotate SSH keys
+
+    مدیریت userpassword در سیستم
+
+    نصب پکیج‌های OS
+
+Ansible نمی‌تواند
+
+    ساخت VPC با subnetها
+
+    provision کردن EC2 از صفر
+
+    مدیریت IAM roles با state
+
+    ساخت RDS cluster
+
+    destroy کامل زیرساخت
+
+    مدیریت DNS records با state
+
+نتیجه تفکیک مسئولیت
+text
+
+┌─────────────────────────────────────────┐
+│  Terraform                              │
+│  زیرساخت را بساز                      │
+│  - VPC, Subnet, SG, EC2, RDS            │
+│  - IAM, DNS, LB, S3                     │
+│  - KMS, Secrets Manager                 │
+└──────────────┬──────────────────────────┘
+               │ output IPs, hostnames
+               ▼
+┌─────────────────────────────────────────┐
+│  Ansible                               │
+│  سیستم را پیکربندی کن                 │
+│  - Install packages                     │
+│  - Config files                         │
+│  - Services                             │
+│  - Users, SSH keys                      │
+│  - App deployment                       │
+└─────────────────────────────────────────┘
+
+۲️⃣ مدل ذهنی Provisioning vs Configuration
+چرخه کامل یک سرویس
+text
+
+1. Terraform ساخت زیرساخت
+   ├─ VPC
+   ├─ Subnet
+   ├─ Security Group
+   ├─ EC2 instance
+   └─ RDS
+
+2. Ansible پیکربندی
+   ├─ OS hardening
+   ├─ nginx
+   ├─ app code
+   ├─ systemd service
+   └─ monitoring agent
+
+3. Ansible Deploy
+   ├─ Pull code
+   ├─ Migrate DB
+   ├─ Restart service
+   └─ Health check
+
+4. Terraform destroy (اگر لازم)
+
+مسئولیت‌ها
+کار	Terraform	Ansible
+ساخت VPC	✅	❌
+ساخت EC2	✅	❌
+نصب nginx	❌	✅
+Config nginx	❌	✅
+SSL cert	⚠️ (ACM)	✅ (Let's Encrypt)
+DNS record	✅ (Route53)	⚠️ (با ماژول)
+Firewall OS	❌	✅ (ufwfirewalld)
+Security Group	✅	❌
+SSH keys (on host)	❌	✅
+IAM roles	✅	❌
+Userpassword on host	❌	✅
+DB schema	❌	✅
+Backup	⚠️ (snapshot)	✅
+Monitoring agent	❌	✅
+Container orchestration	⚠️ (EKS)	✅ (HelmK8s)
+
+قانون طلایی
+
+    Terraform = cattle (ساختحذف)
+    Ansible = petting (پیکربندی داخلی)
+
+۳️⃣ الگوهای معماری (۴ الگوی اصلی)
+الگوی ۱ Terraform Provisioning → Ansible Configuration
+text
+
+Terraform
+  ↓ (apply)
+Cloud infrastructure
+  ↓ (output IPs, inventory)
+Ansible
+  ↓ (playbooks)
+Configured system
+
+رایج‌ترین الگو. مناسب برای
+
+    AWSAzureGCP
+
+    VM provisioning
+
+    Kubernetes cluster
+
+الگوی ۲ Terraform Provisioning + Cloud-init
+text
+
+Terraform
+  ↓ (user_data  cloud-init)
+VM با ابزار اولیه
+  ↓ (ansible-pull از git)
+Self-configuring
+
+مناسب برای
+
+    Immutable infrastructure
+
+    Auto-scaling groups
+
+    Infrastructure as Code خالص
+
+الگوی ۳ Ansible Orchestrator → Terraform Module
+text
+
+Ansible playbook
+  ↓ (community.general.terraform)
+Terraform apply
+  ↓
+Infrastructure
+  ↓ (back to Ansible)
+Configure
+
+مناسب برای
+
+    تیم‌هایی که Ansible-first هستند
+
+    کوچک‌تر از provisioning کل
+
+الگوی ۴ Multi-Stage Pipeline
+text
+
+CICD Pipeline
+  ├─ Stage 1 terraform plan
+  ├─ Stage 2 terraform apply
+  ├─ Stage 3 ansible-playbook (config)
+  ├─ Stage 4 tests
+  └─ Stage 5 monitoring
+
+مناسب برای Enterprise production.
+۴️⃣ Terraform → Ansible
+۴.۱ Output به Inventory
+Terraform
+hcl
+
+# outputs.tf
+output web_ips {
+  value = aws_instance.web[].public_ip
+}
+
+output db_endpoint {
+  value = aws_db_instance.main.endpoint
+  sensitive = true
+}
+
+output ssh_private_key {
+  value = tls_private_key.key.private_key_openssh
+  sensitive = true
+}
+
+output ansible_inventory {
+  value = templatefile(${path.module}templatesinventory.tpl, {
+    web_ips = aws_instance.web[].public_ip
+    db_endpoint = aws_db_instance.main.address
+  })
+}
+
+Template
+ini
+
+# templatesinventory.tpl
+[webservers]
+%{ for ip in web_ips ~}
+web-${ip} ansible_host=${ip} ansible_user=deploy
+%{ endfor ~}
+
+[databases]
+db ansible_host=${db_endpoint} ansible_user=admin
+
+[allvars]
+ansible_ssh_private_key_file=etcansiblekeysdeploy
+ansible_python_interpreter=usrbinpython3
+
+تولید فایل inventory
+bash
+
+terraform output -raw ansible_inventory  etcansibleinventoryprodhosts.ini
+ansible-playbook -i etcansibleinventoryprodhosts.ini site.yml
+
+۴.۲ JSON Inventory
+hcl
+
+output ansible_inventory_json {
+  value = {
+    webservers = {
+      hosts = {
+        for idx, ip in aws_instance.web[].public_ip 
+        web-${idx} = {
+          ansible_host = ip
+          ansible_user = deploy
+        }
+      }
+    }
+    databases = {
+      hosts = {
+        db = {
+          ansible_host = aws_db_instance.main.address
+          ansible_user = admin
+        }
+      }
+    }
+    _meta = {
+      hostvars = {}
+    }
+  }
+}
+
+bash
+
+terraform output -json ansible_inventory_json  inventory.json
+ansible-inventory -i inventory.json --graph
+
+۴.۳ terraform output → Ansible vars
+bash
+
+# گرفتن تمام outputها
+terraform output -json  tf_outputs.json
+
+# در playbook
+
+yaml
+
+- hosts all
+  vars_files
+    - tf_outputs.json
+
+  tasks
+    - name configure with TF outputs
+      template
+        src config.j2
+        dest etcappconfig
+      vars
+        db_endpoint {{ db_endpoint }}
+        bucket {{ s3_bucket_name }}
+
+۴.۴ Direct Invocation از Terraform
+local-exec (ساده، ولی نه production)
+hcl
+
+resource aws_instance web {
+  # ...
+
+  provisioner local-exec {
+    command = -EOT
+      sleep 30
+      ansible-playbook -i ${self.public_ip}, 
+        -u ubuntu 
+        --private-key ${var.ssh_key_path} 
+        playbooksconfigure-web.yml
+    EOT
+  }
+}
+
+resource aws_instance web {
+  # ...
+  provisioner local-exec {
+    when = destroy
+    command = ansible-playbook -i ${self.public_ip}, playbookscleanup.yml
+  }
+}
+
+⚠️ مشکلات local-exec
+
+    race condition (VM آماده نیست)
+
+    state corrupt اگر fail
+
+    re-run مشکل
+
+    non-idempotent
+
+استفاده در production ❌ (فقط onboarding)
+۴.۵ remote-exec (بد نیست)
+hcl
+
+resource aws_instance web {
+  # ...
+  connection {
+    type = ssh
+    user = ubuntu
+    private_key = file(var.ssh_key_path)
+    host = self.public_ip
+  }
+
+  provisioner remote-exec {
+    inline = [
+      sudo apt update,
+      sudo apt install -y python3,
+      sudo apt install -y ansible,
+    ]
+  }
+
+  provisioner remote-exec {
+    inline = [
+      git clone httpsgithub.comorgansible.git tmpansible,
+      cd tmpansible && ansible-playbook -i localhost, -c local site.yml,
+    ]
+  }
+}
+
+⚠️ هنوز race condition دارد.
+۴.۶ الگوی حرفه‌ای null_resource + local-exec + triggers
+hcl
+
+resource null_resource configure_web {
+  depends_on = [aws_instance.web, aws_security_group.web]
+
+  triggers = {
+    instance_ids = join(,, aws_instance.web[].id)
+    playbook_hash = filemd5(${path.module}playbookssite.yml)
+  }
+
+  provisioner local-exec {
+    command = -EOT
+      set -e
+      
+      # 1. wait for SSH
+      for ip in ${join( , aws_instance.web[].public_ip)}; do
+        until nc -z -w 2 $ip 22; do
+          echo Waiting for $ip...
+          sleep 5
+        done
+      done
+      
+      # 2. generate inventory
+      cat  tmpinventory-${self.id}.ini EOL
+[webservers]
+%{ for idx, ip in aws_instance.web[].public_ip ~}
+web-${idx} ansible_host=${ip} ansible_user=ubuntu
+%{ endfor ~}
+EOL
+      
+      # 3. run playbook
+      ansible-playbook 
+        -i tmpinventory-${self.id}.ini 
+        -e env=prod 
+        --vault-password-file=etcansible.vault_pass 
+        ${path.module}playbookssite.yml
+    EOT
+  }
+
+  provisioner local-exec {
+    when = destroy
+    command = echo 'Cleanup instances going away'
+  }
+}
+
+مزایا
+
+    depends_on تضمین ترتیب
+
+    triggers = اجرای مجدد فقط وقتی تغییر
+
+    state-aware
+
+    cleanup explicit
+
+۴.۷ بهترین روش Pipeline جدا
+text
+
+┌──────────────────────────────────┐
+│  Stage 1 terraform apply        │
+│  - Provision infra                │
+│  - Output inventory               │
+└────────────┬─────────────────────┘
+             ▼
+┌──────────────────────────────────┐
+│  Stage 2 ansible-playbook       │
+│  - Read inventory from stage 1   │
+│  - Configure                      │
+└──────────────────────────────────┘
+
+yaml
+
+# .gitlab-ci.yml
+stages
+  - provision
+  - configure
+
+terraform-apply
+  stage provision
+  script
+    - terraform init
+    - terraform apply -auto-approve -var-file=envprod.tfvars
+    - terraform output -json  tf_outputs.json
+    - terraform output -raw ansible_inventory  inventory.ini
+  artifacts
+    paths
+      - tf_outputs.json
+      - inventory.ini
+
+ansible-configure
+  stage configure
+  needs [terraform-apply]
+  script
+    - ansible-playbook -i inventory.ini playbookssite.yml
+
+۴.۸ Cloud-init + Ansible
+hcl
+
+resource aws_instance web {
+  ami           = data.aws_ami.ubuntu.id
+  instance_type = t3.micro
+
+  user_data = templatefile(${path.module}templatescloud-init.yml, {
+    ansible_repo = httpsgithub.comorgansible-config.git
+    env = var.environment
+  })
+}
+
+yaml
+
+# templatescloud-init.yml
+#cloud-config
+package_update true
+packages
+  - python3
+  - python3-pip
+  - git
+
+runcmd
+  - pip3 install 'ansible-core==2.17.6'
+  - git clone ${ansible_repo} optansible
+  - cd optansible && ansible-playbook -i localhost, -c local site.yml -e env=${env}
+
+مزایا
+
+    Self-contained
+
+    Auto-scaling friendly
+
+    بدون SSH از control node
+
+معایب
+
+    بازگشت‌ناپذیری (اگر init fail)
+
+    لاگ در varlogcloud-init-output.log
+
+    بدون visibility از control node
+
+۴.۹ Ansible Pull Mode
+hcl
+
+resource aws_instance web {
+  user_data = -EOF
+    #!binbash
+    apt update && apt install -y git python3-pip
+    pip3 install 'ansible-core==2.17.6'
+    ansible-pull 
+      -U httpsgithub.comorgansible-config.git 
+      -C main 
+      -d varlibansible-local 
+      -i localhost, 
+      playbookssite.yml
+  EOF
+}
+
+مزایا
+
+    Pull-based (مثل ChefPuppet)
+
+    Auto-scaling
+
+    حذف dependency
+
+معایب
+
+    نیاز به git access از instance
+
+    secrets delivery سخت
+
+۵️⃣ Ansible → Terraform
+۵.۱ نصب Terraform
+yaml
+
+- name install terraform
+  hosts localhost
+  tasks
+    - name download
+      get_url
+        url httpsreleases.hashicorp.comterraform{{ tf_version }}terraform_{{ tf_version }}_linux_amd64.zip
+        dest tmpterraform.zip
+        checksum sha256{{ tf_sha256 }}
+
+    - name unzip
+      unarchive
+        src tmpterraform.zip
+        dest usrlocalbin
+        remote_src yes
+        creates usrlocalbinterraform
+
+    - name verify
+      command terraform version
+      register tf
+      changed_when false
+
+    - assert
+        that
+          - tf_version in tf.stdout
+
+۵.۲ اجرای Terraform از Ansible
+yaml
+
+- name provision with terraform
+  hosts localhost
+  connection local
+
+  tasks
+    - name terraform init
+      command terraform init
+      args
+        chdir {{ tf_dir }}
+      register init
+      changed_when 'Initializing' in init.stdout
+
+    - name terraform plan
+      command 
+        terraform plan
+        -var-file={{ env }}.tfvars
+        -out=tfplan
+      args
+        chdir {{ tf_dir }}
+      register plan
+      changed_when 'No changes' not in plan.stdout
+
+    - name terraform apply
+      command terraform apply tfplan
+      args
+        chdir {{ tf_dir }}
+      when plan.changed
+      register apply
+
+    - name get outputs
+      command terraform output -json
+      args
+        chdir {{ tf_dir }}
+      register outputs
+      changed_when false
+
+    - set_fact
+        tf_out {{ outputs.stdout  from_json }}
+
+    - name update inventory
+      copy
+        content 
+          [webservers]
+          {% for ip in tf_out.web_ips.value %}
+          web-{{ loop.index0 }} ansible_host={{ ip }}
+          {% endfor %}
+        dest etcansibleinventoryprodhosts.ini
+
+۵.۳ Best Practice community.general.terraform
+۶️⃣ ماژول community.general.terraform
+نصب
+bash
+
+ansible-galaxy collection install community.general
+
+پارامترهای کلیدی
+yaml
+
+community.general.terraform
+  project_path pathtotf        # مسیر project
+  state present                   # present  absent (destroy)
+  plan_file tfplan                # ذخیره plan
+  state_file terraform.tfstate    # مسیر state
+  backend_config {}               # backend
+  force_init false                # init اجباری
+  init_reconfigure false
+  variables                       # -var
+    env production
+    instance_count 3
+  var_file prod.tfvars            # -var-file
+  workspace prod                  # workspace
+  complex_vars true               # nested maps
+  target                          # -target
+    - aws_instance.web
+  lock true                       # state lock
+  lock_timeout 60
+  parallelism 10
+
+مثال Production
+yaml
+
+- name provision AWS infrastructure
+  hosts localhost
+  connection local
+  gather_facts false
+
+  vars
+    tf_project optterraformaws-infra
+
+  tasks
+    - name terraform apply
+      community.general.terraform
+        project_path {{ tf_project }}
+        state present
+        variables
+          environment production
+          region us-east-1
+          vpc_cidr 10.0.0.016
+          instance_count 3
+        plan_file {{ tf_project }}tfplan
+        state_file {{ tf_project }}terraform.tfstate
+        force_init true
+        lock true
+        lock_timeout 120
+      register tf
+
+    - name show outputs
+      debug
+        var tf.outputs
+
+    - name store outputs
+      set_fact
+        web_ips {{ tf.outputs.web_ips.value }}
+        db_endpoint {{ tf.outputs.db_endpoint.value }}
+
+    - name configure web servers
+      include_tasks tasksconfigure-web.yml
+      when tf.changed
+
+- name destroy (when needed)
+  hosts localhost
+  tasks
+    - name terraform destroy
+      community.general.terraform
+        project_path optterraformaws-infra
+        state absent
+        variables
+          environment production
+      when destroy_flag  default(false)
+
+State Management
+yaml
+
+- name terraform with S3 backend
+  community.general.terraform
+    project_path opttf
+    state present
+    backend_config
+      bucket my-tf-state-prod
+      key aws-infraterraform.tfstate
+      region us-east-1
+      dynamodb_table tf-lock-prod
+      encrypt true
+
+فایل backend.tf معادل
+hcl
+
+terraform {
+  backend s3 {
+    bucket         = my-tf-state-prod
+    key            = aws-infraterraform.tfstate
+    region         = us-east-1
+    dynamodb_table = tf-lock-prod
+    encrypt        = true
+  }
+}
+
+نکات مهم
+نکته	توضیح
+state absent	destroy کامل
+plan_file	ذخیره plan برای apply دو مرحله‌ای
+force_init	اجرای init اجباری
+workspace	multi-env (devstagingprod)
+complex_vars	برای nested mapslists
+target	اجرای محدود (نه prod)
+Idempotency
+
+ماژول بومی idempotent است
+
+    اگر هیچ تغییری لازم نباشد → changed false
+
+    اگر تغییر لازم باشد → changed true
+
+yaml
+
+- name terraform
+  community.general.terraform
+    project_path opttf
+    state present
+  register tf
+
+- debug
+    msg {{ 'Changed' if tf.changed else 'No changes' }}
+
+۷️⃣ Terraform Provider برای Ansible
+terraform-provider-ansible
+
+⚠️ community-maintained، نه HashiCorp official
+hcl
+
+terraform {
+  required_providers {
+    ansible = {
+      source = nberkowitzansible
+      version = 0.1.0
+    }
+  }
+}
+
+provider ansible {}
+
+resource ansible_host web {
+  name = aws_instance.web.public_ip
+  groups = [webservers]
+  variables = {
+    ansible_user = ubuntu
+    ansible_python_interpreter = usrbinpython3
+  }
+}
+
+resource ansible_playbook configure {
+  playbook = playbookssite.yml
+  name = aws_instance.web.public_ip
+  extra_vars = {
+    env = production
+  }
+  replayable = true
+}
+
+⚠️ توصیه از این provider استفاده نکن. Providerهای غیررسمی مشکل maintenance دارند. local-exec + null_resource بهتر است.
+۸️⃣ الگوی Local-exec + Ansible (Production-Grade)
+hcl
+
+# null_resource با triggers دقیق
+resource null_resource ansible_configure {
+  depends_on = [
+    aws_instance.web,
+    aws_instance.db,
+    aws_security_group.web,
+  ]
+
+  triggers = {
+    web_instance_ids = join(,, aws_instance.web[].id)
+    ansible_commit = var.ansible_commit_sha  # از CI
+    config_hash = filemd5(${path.module}playbookssite.yml)
+  }
+
+  provisioner local-exec {
+    command = ${path.module}scriptsrun-ansible.sh
+    environment = {
+      ANSIBLE_INVENTORY = aws_instance.web[0].public_ip
+      ANSIBLE_CONFIG = etcansibleansible.cfg
+      ENV = var.environment
+      VAULT_PASS_FILE = etcansible.vault_pass
+    }
+  }
+
+  provisioner local-exec {
+    when = destroy
+    command = ${path.module}scriptscleanup-ansible.sh
+  }
+}
+
+bash
+
+#!binbash
+# scriptsrun-ansible.sh
+set -euo pipefail
+
+echo Waiting for SSH...
+for i in {1..60}; do
+  if nc -z -w 2 $ANSIBLE_INVENTORY 22; then
+    echo SSH ready
+    break
+  fi
+  sleep 5
+done
+
+echo Generating inventory...
+cat  tmpinv-$$.ini EOF
+[webservers]
+${ANSIBLE_INVENTORY} ansible_user=ubuntu ansible_ssh_private_key_file=etcansiblekeysdeploy
+
+[allvars]
+ansible_python_interpreter=usrbinpython3
+EOF
+
+echo Running ansible-playbook...
+ansible-playbook 
+  -i tmpinv-$$.ini 
+  -e env=${ENV} 
+  --vault-password-file=${VAULT_PASS_FILE} 
+  ${ANSIBLE_PLAYBOOK-playbookssite.yml}
+
+echo Cleanup...
+rm -f tmpinv-$$.ini
+
+مزایای این الگو
+
+    depends_on = ترتیب
+
+    triggers = re-run فقط وقتی تغییر
+
+    bash script = تست‌پذیر
+
+    cleanup در destroy
+
+۹️⃣ Cloud-init + Ansible (کامل)
+hcl
+
+# templatesuser-data.tpl
+#cloud-config
+
+package_update true
+packages
+  - python3
+  - python3-pip
+  - git
+  - curl
+
+write_files
+  - path etcansible-config
+    content 
+      ANSIBLE_CONFIG=optansibleansible.cfg
+      ANSIBLE_VAULT_PASSWORD_FILE=optvault.vault_pass
+    permissions '0600'
+
+  - path optvault.vault_pass
+    content ${vault_pass}
+    permissions '0600'
+
+runcmd
+  - pip3 install 'ansible-core==2.17.6'
+  - git clone httpsgithub.comorgansible-config.git optansible
+  - cd optansible && ansible-playbook -i localhost, -c local site.yml -e env=${env}
+  - touch varlibcloud-initansible-done
+
+final_message Ansible completed at $TIMESTAMP
+
+hcl
+
+resource aws_instance web {
+  ami           = data.aws_ami.ubuntu.id
+  instance_type = var.instance_type
+
+  user_data = templatefile(${path.module}templatesuser-data.tpl, {
+    env        = var.environment
+    vault_pass = var.vault_pass
+  })
+}
+
+مزایا
+
+    No SSH از control node
+
+    Auto-scaling
+
+    Immutable
+
+معایب
+
+    Secrets در user-data (لاگ می‌شود!)
+
+    Debug سخت
+
+    rollback سخت
+
+توصیه برای secrets از ssm یا metadata استفاده کن، نه user_data plaintext.
+۱۰️⃣ User Data + Ansible Pull
+hcl
+
+user_data = -EOF
+  #!binbash
+  set -euxo pipefail
+  
+  apt-get update
+  DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-pip git
+  
+  pip3 install 'ansible-core==2.17.6'
+  
+  # Fetch vault password from Secrets Manager
+  pip3 install boto3
+  VAULT_PASS=$(python3 -c 
+  import boto3, json
+  sm = boto3.client('secretsmanager', region_name='us-east-1')
+  print(json.loads(sm.get_secret_value(SecretId='ansiblevault')['SecretString'])['password'])
+  )
+  
+  ansible-pull 
+    -U httpsgithub.comorgansible-config.git 
+    -C ${var.ansible_branch} 
+    -d varlibansible-local 
+    -i localhost, 
+    --vault-password-file=(echo $VAULT_PASS) 
+    playbookssite.yml
+EOF
+
+۱۱️⃣ Dynamic Inventory از Terraform State
+اسکریپت پایتون
+python
+
+#!usrbinenv python3
+# inventoryterraform_inventory.py
+
+Reads Terraform state and builds Ansible inventory.
+Usage .terraform_inventory.py --list
+
+import json
+import subprocess
+import sys
+import argparse
+from pathlib import Path
+
+
+def get_tf_state(tf_dir str) - dict
+    زندگی‌تر از state
+    result = subprocess.run(
+        ['terraform', 'show', '-json'],
+        cwd=tf_dir,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return json.loads(result.stdout)
+
+
+def build_inventory(state dict) - dict
+    inventory = {
+        '_meta' {'hostvars' {}},
+        'all' {'children' []},
+    }
+    
+    resources = state.get('values', {}).get('root_module', {}).get('resources', [])
+    
+    for r in resources
+        r_type = r.get('type')
+        r_name = r.get('name')
+        values = r.get('values', {})
+        
+        # EC2 instances
+        if r_type == 'aws_instance'
+            instance_id = values.get('id', '')
+            ip = values.get('public_ip') or values.get('private_ip')
+            name = values.get('tags', {}).get('Name', f'instance-{instance_id[8]}')
+            
+            # groups based on tags
+            tags = values.get('tags', {})
+            role = tags.get('Role', 'ungrouped')
+            env = tags.get('Environment', 'unknown')
+            
+            groups = [role, env, f'{role}_{env}']
+            
+            for g in groups
+                if g not in inventory
+                    inventory[g] = {'hosts' []}
+                inventory[g]['hosts'].append(name)
+            
+            inventory['_meta']['hostvars'][name] = {
+                'ansible_host' ip,
+                'ansible_user' 'ubuntu',
+                'ansible_ssh_private_key_file' 'etcansiblekeysdeploy',
+                'instance_id' instance_id,
+                'instance_type' values.get('instance_type'),
+                'environment' env,
+                'role' role,
+            }
+    
+    inventory['all']['children'] = [k for k in inventory if k not in ('_meta', 'all')]
+    return inventory
+
+
+def main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--list', action='store_true')
+    parser.add_argument('--host')
+    parser.add_argument('--tf-dir', default='.')
+    args = parser.parse_args()
+    
+    state = get_tf_state(args.tf_dir)
+    
+    if args.list
+        print(json.dumps(build_inventory(state), indent=2))
+    elif args.host
+        inv = build_inventory(state)
+        print(json.dumps(inv['_meta']['hostvars'].get(args.host, {})))
+
+
+if __name__ == '__main__'
+    main()
+
+bash
+
+chmod +x inventoryterraform_inventory.py
+ansible-inventory -i inventoryterraform_inventory.py --graph
+ansible-playbook -i inventoryterraform_inventory.py site.yml
+
+نسخه Plugin (بهتر)
+python
+
+# inventory_pluginstfstate.py
+from ansible.plugins.inventory import BaseInventoryPlugin
+import json
+import subprocess
+
+DOCUMENTATION = '''
+name tfstate
+plugin_type inventory
+options
+  plugin
+    required true
+    choices ['tfstate']
+  project_dir
+    required true
+  binary
+    default terraform
+'''
+
+class InventoryModule(BaseInventoryPlugin)
+    NAME = 'tfstate'
+
+    def verify_file(self, path)
+        return path.endswith(('.tfstate.yml', '.tfstate.yaml'))
+
+    def parse(self, inventory, loader, path, cache=True)
+        super().parse(inventory, loader, path)
+        self._read_config_data(path)
+        
+        project_dir = self.get_option('project_dir')
+        binary = self.get_option('binary')
+        
+        result = subprocess.run(
+            [binary, 'show', '-json'],
+            cwd=project_dir,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        state = json.loads(result.stdout)
+        
+        for r in state['values']['root_module'].get('resources', [])
+            if r['type'] != 'aws_instance'
+                continue
+            
+            values = r['values']
+            host = values.get('tags', {}).get('Name', values['id'][12])
+            ip = values.get('public_ip') or values.get('private_ip')
+            
+            self.inventory.add_host(host)
+            self.inventory.set_variable(host, 'ansible_host', ip)
+            self.inventory.set_variable(host, 'ansible_user', 'ubuntu')
+            
+            for group in [values.get('tags', {}).get('Role', 'web'),
+                          values.get('tags', {}).get('Environment', 'prod')]
+                self.inventory.add_group(group)
+                self.inventory.add_child(group, host)
+
+yaml
+
+# inventoryprod.tfstate.yml
+plugin tfstate
+project_dir optterraformaws-infra
+binary terraform
+
+bash
+
+ansible-inventory -i inventoryprod.tfstate.yml --graph
+
+۱۲️⃣ Terraform CloudEnterprise + Ansible
+Flow
+text
+
+Terraform Cloud
+  ├─ VCS (GitHub)
+  ├─ Plan
+  ├─ Apply
+  └─ Outputs
+       ↓
+  Ansible (pulls state)
+
+از API TFC
+python
+
+# inventorytfc_inventory.py
+import os
+import requests
+
+TFC_TOKEN = os.environ['TFC_TOKEN']
+WORKSPACE = 'aws-infra-prod'
+ORG = 'my-org'
+
+def get_outputs()
+    headers = {'Authorization' f'Bearer {TFC_TOKEN}'}
+    r = requests.get(
+        f'httpsapp.terraform.ioapiv2organizations{ORG}workspaces{WORKSPACE}current-state-versioninclude=outputs',
+        headers=headers,
+    )
+    return r.json()
+
+outputs = get_outputs()
+# parse outputs → inventory
+
+استفاده
+bash
+
+export TFC_TOKEN=...
+ansible-playbook -i inventorytfc_inventory.py site.yml
+
+۱۳️⃣ Atlantis + Ansible
+Atlantis برای Terraform PR
+
+atlantis.yaml
+yaml
+
+version 3
+projects
+  - name aws-infra
+    dir terraformaws
+    workspace prod
+    terraform_version v1.6.0
+    autoplan
+      when_modified
+        - .tf
+        - envprod
+    apply_requirements
+      - approved
+      - mergeable
+
+Ansible بعد از Atlantis apply
+yaml
+
+# .githubworkflowsansible.yml
+name Configure after Terraform
+on
+  workflow_run
+    workflows [Atlantis]
+    types [completed]
+
+jobs
+  configure
+    if ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on ubuntu-latest
+    steps
+      - uses actionscheckout@v4
+      
+      - name Setup Ansible
+        run 
+          pip install 'ansible-core==2.17.6'
+          
+      - name Configure
+        run 
+          ansible-playbook 
+            -i inventoryterraform_inventory.py 
+            -e @tf_outputs.json 
+            playbookssite.yml
+        env
+          ANSIBLE_VAULT_PASSWORD_FILE ${{ secrets.VAULT_PASS }}
+
+۱۴️⃣ Terragrunt + Ansible
+hcl
+
+# terragrunt.hcl
+terraform {
+  source = gitgit@github.comorgtf-modules.gitmodulesvpcref=v1.0.0
+}
+
+include root {
+  path = find_in_parent_folders()
+}
+
+inputs = {
+  cidr = 10.0.0.016
+  env  = prod
+}
+
+bash
+
+terragrunt apply-all
+terragrunt output-all -json  outputs.json
+ansible-playbook -i inventory -e @outputs.json site.yml
+
+۱۵️⃣ مثال کامل AWS (VPC + EC2 + Config)
+Terraform
+hcl
+
+# main.tf
+terraform {
+  required_version = = 1.5.0
+  backend s3 {
+    bucket         = tf-state-prod
+    key            = awsterraform.tfstate
+    region         = us-east-1
+    dynamodb_table = tf-lock
+    encrypt        = true
+  }
+  required_providers {
+    aws = {
+      source  = hashicorpaws
+      version = ~ 5.0
+    }
+  }
+}
+
+provider aws {
+  region = var.region
+}
+
+module vpc {
+  source  = terraform-aws-modulesvpcaws
+  version = 5.1.0
+
+  name = ${var.env}-vpc
+  cidr = 10.0.0.016
+
+  azs             = [${var.region}a, ${var.region}b]
+  private_subnets = [10.0.1.024, 10.0.2.024]
+  public_subnets  = [10.0.101.024, 10.0.102.024]
+
+  enable_nat_gateway = true
+  single_nat_gateway = true
+
+  tags = { Environment = var.env }
+}
+
+module ec2 {
+  source  = terraform-aws-modulesec2-instanceaws
+  version = 5.5.0
+
+  for_each = toset([web01, web02])
+
+  name          = ${var.env}-${each.key}
+  instance_type = t3.micro
+  subnet_id     = module.vpc.private_subnets[0]
+  vpc_security_group_ids = [aws_security_group.web.id]
+
+  user_data = file(${path.module}templatesuser-data.sh)
+
+  tags = {
+    Environment = var.env
+    Role        = webserver
+  }
+}
+
+resource aws_security_group web {
+  name        = ${var.env}-web-sg
+  vpc_id      = module.vpc.vpc_id
+
+  ingress {
+    from_port   = 22
+    to_port     = 22
+    protocol    = tcp
+    cidr_blocks = [10.0.0.016]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = -1
+    cidr_blocks = [0.0.0.00]
+  }
+}
+
+output web_ips {
+  value = { for k, v in module.ec2  k = v.private_ip }
+}
+
+output vpc_id {
+  value = module.vpc.vpc_id
+}
+
+تولید inventory از Terraform
+bash
+
+cd terraform
+terraform output -json web_ips  tmpweb_ips.json
+
+python
+
+# scriptsgen_inventory.py
+import json
+
+with open('tmpweb_ips.json') as f
+    ips = json.load(f)
+
+with open('etcansibleinventoryprodhosts.ini', 'w') as f
+    f.write([webservers]n)
+    for name, ip in ips.items()
+        f.write(f{name} ansible_host={ip} ansible_user=ubuntun)
+    f.write(n[webserversvars]n)
+    f.write(ansible_ssh_private_key_file=etcansiblekeysdeployn)
+    f.write(ansible_python_interpreter=usrbinpython3n)
+
+Ansible Playbook
+yaml
+
+# playbookssite.yml
+- hosts webservers
+  become true
+  gather_facts true
+
+  roles
+    - common
+    - nginx
+    - monitoring
+
+  post_tasks
+    - name health check
+      uri
+        url http{{ inventory_hostname }}health
+        status_code 200
+      retries 10
+      delay 3
+      delegate_to localhost
+
+CICD
+yaml
+
+# .gitlab-ci.yml
+stages
+  - terraform-plan
+  - terraform-apply
+  - ansible-configure
+  - verify
+
+variables
+  TF_ROOT terraform
+  ANSIBLE_ROOT ansible
+
+terraform-plan
+  stage terraform-plan
+  image hashicorpterraform1.6
+  script
+    - cd $TF_ROOT
+    - terraform init
+    - terraform plan -var-file=envprod.tfvars -out=tfplan
+  artifacts
+    paths
+      - $TF_ROOTtfplan
+
+terraform-apply
+  stage terraform-apply
+  image hashicorpterraform1.6
+  needs [terraform-plan]
+  when manual
+  script
+    - cd $TF_ROOT
+    - terraform apply tfplan
+    - terraform output -json web_ips  tmpweb_ips.json
+  artifacts
+    paths
+      - tmpweb_ips.json
+
+ansible-configure
+  stage ansible-configure
+  image python3.11
+  needs [terraform-apply]
+  before_script
+    - pip install 'ansible-core==2.17.6'
+    - pip install boto3
+  script
+    - python scriptsgen_inventory.py
+    - ansible-playbook -i etcansibleinventoryprodhosts.ini ansibleplaybookssite.yml
+  secrets
+    VAULT_PASS
+      vault ansiblevault@prod
+
+verify
+  stage verify
+  needs [ansible-configure]
+  script
+    - ansible-playbook -i inventory prodverify.yml
+
+۱۶️⃣ مثال کامل Azure
+Terraform
+hcl
+
+provider azurerm {
+  features {}
+}
+
+resource azurerm_resource_group main {
+  name     = rg-${var.env}
+  location = var.location
+}
+
+resource azurerm_virtual_network main {
+  name                = vnet-${var.env}
+  address_space       = [10.0.0.016]
+  location            = azurerm_resource_group.main.location
+  resource_group_name = azurerm_resource_group.main.name
+}
+
+resource azurerm_subnet web {
+  name                 = web-subnet
+  resource_group_name  = azurerm_resource_group.main.name
+  virtual_network_name = azurerm_virtual_network.main.name
+  address_prefixes     = [10.0.1.024]
+}
+
+resource azurerm_linux_virtual_machine web {
+  count                 = 2
+  name                  = web-${count.index + 1}
+  resource_group_name   = azurerm_resource_group.main.name
+  location              = azurerm_resource_group.main.location
+  size                  = Standard_B1s
+  admin_username        = azureuser
+  network_interface_ids = [azurerm_network_interface.web[count.index].id]
+
+  admin_ssh_key {
+    username   = azureuser
+    public_key = file(var.ssh_public_key)
+  }
+
+  os_disk {
+    caching              = ReadWrite
+    storage_account_type = Standard_LRS
+  }
+
+  source_image_reference {
+    publisher = Canonical
+    offer     = 0001-com-ubuntu-server-jammy
+    sku       = 22_04-lts
+    version   = latest
+  }
+
+  tags = { Role = webserver }
+}
+
+resource azurerm_network_interface web {
+  count               = 2
+  name                = nic-web-${count.index + 1}
+  location            = azurerm_resource_group.main.location
+  resource_group_name = azurerm_resource_group.main.name
+
+  ip_configuration {
+    name                          = internal
+    subnet_id                     = azurerm_subnet.web.id
+    private_ip_address_allocation = Dynamic
+  }
+}
+
+output web_private_ips {
+  value = azurerm_linux_virtual_machine.web[].private_ip_address
+}
+
+Dynamic Inventory از Azure (بدون Terraform state)
+yaml
+
+# inventoryazure_rm.yml
+plugin azure.azcollection.azure_rm
+include_vm_resource_groups [rg-prod]
+auth_source cli
+keyed_groups
+  - prefix tag
+    key tags
+  - prefix rg
+    key resource_group
+conditional_groups
+  webservers 'webserver' in tags.Role
+hostvar_expressions
+  ansible_host private_ipv4_addresses[0]
+
+bash
+
+ansible-inventory -i inventoryazure_rm.yml --graph
+
+۱۷️⃣ مثال کامل GCP
+hcl
+
+provider google {
+  project = var.project_id
+  region  = var.region
+}
+
+resource google_compute_instance web {
+  count        = 2
+  name         = web-${count.index + 1}
+  machine_type = e2-micro
+  zone         = ${var.region}-a
+
+  boot_disk {
+    initialize_params {
+      image = ubuntu-os-cloudubuntu-2204-lts
+    }
+  }
+
+  network_interface {
+    network = default
+    access_config {}
+  }
+
+  metadata_startup_script = templatefile(${path.module}startup.sh, {
+    env = var.env
+  })
+
+  metadata = {
+    ssh-keys = ubuntu${file(var.ssh_public_key)}
+  }
+
+  tags = [webserver, var.env]
+}
+
+output web_ips {
+  value = google_compute_instance.web[].network_interface[0].access_config[0].nat_ip
+}
+
+Ansible با gcp_compute plugin
+yaml
+
+# inventorygcp.yml
+plugin google.cloud.gcp_compute
+projects
+  - my-project
+zones
+  - us-central1-a
+filters
+  - status = RUNNING
+keyed_groups
+  - key tags.items
+    prefix tag
+hostnames
+  - name
+compose
+  ansible_host networkInterfaces[0].accessConfigs[0].natIP
+
+۱۸️⃣ مثال کامل On-Prem (vSphere)
+hcl
+
+provider vsphere {
+  user           = var.vsphere_user
+  password       = var.vsphere_password
+  vsphere_server = var.vsphere_server
+  allow_unverified_ssl = true
+}
+
+data vsphere_datacenter dc {
+  name = DC1
+}
+
+data vsphere_datastore datastore {
+  name          = datastore1
+  datacenter_id = data.vsphere_datacenter.dc.id
+}
+
+data vsphere_compute_cluster cluster {
+  name          = Cluster1
+  datacenter_id = data.vsphere_datacenter.dc.id
+}
+
+data vsphere_network network {
+  name          = VM Network
+  datacenter_id = data.vsphere_datacenter.dc.id
+}
+
+data vsphere_virtual_machine template {
+  name          = ubuntu-22-template
+  datacenter_id = data.vsphere_datacenter.dc.id
+}
+
+resource vsphere_virtual_machine web {
+  count = 3
+
+  name             = web-${count.index + 1}
+  resource_pool_id = data.vsphere_compute_cluster.cluster.resource_pool_id
+  datastore_id     = data.vsphere_datastore.datastore.id
+  num_cpus         = 2
+  memory           = 4096
+  guest_id         = data.vsphere_virtual_machine.template.guest_id
+  scsi_type        = data.vsphere_virtual_machine.template.scsi_type
+
+  network_interface {
+    network_id   = data.vsphere_network.network.id
+    adapter_type = data.vsphere_virtual_machine.template.network_interface_types[0]
+  }
+
+  disk {
+    label            = disk0
+    size             = 40
+    thin_provisioned = true
+  }
+
+  clone {
+    template_uuid = data.vsphere_virtual_machine.template.id
+
+    customize {
+      linux_options {
+        host_name = web-${count.index + 1}
+        domain    = internal.example.com
+      }
+
+      network_interface {
+        ipv4_address = 10.0.1.${10 + count.index}
+        ipv4_netmask = 24
+      }
+
+      ipv4_gateway = 10.0.1.1
+    }
+  }
+
+  connection {
+    type     = ssh
+    user     = ubuntu
+    private_key = file(var.ssh_key_path)
+    host     = self.default_ip_address
+  }
+
+  provisioner remote-exec {
+    inline = [
+      echo 'Waiting for cloud-init...',
+      cloud-init status --wait,
+      echo 'Ready for Ansible',
+    ]
+  }
+}
+
+output web_ips {
+  value = vsphere_virtual_machine.web[].default_ip_address
+}
+
+۱۹️⃣ Kubernetes (EKS + Apps)
+Terraform (provision EKS)
+hcl
+
+module eks {
+  source  = terraform-aws-moduleseksaws
+  version = 19.0.0
+
+  cluster_name    = prod-eks
+  cluster_version = 1.28
+
+  vpc_id     = module.vpc.vpc_id
+  subnet_ids = module.vpc.private_subnets
+
+  eks_managed_node_groups = {
+    main = {
+      min_size     = 2
+      max_size     = 10
+      desired_size = 3
+
+      instance_types = [t3.medium]
+    }
+  }
+}
+
+output cluster_endpoint {
+  value = module.eks.cluster_endpoint
+}
+
+output cluster_name {
+  value = module.eks.cluster_name
+}
+
+output cluster_certificate_authority_data {
+  value = module.eks.cluster_certificate_authority_data
+}
+
+Ansible (deploy apps)
+yaml
+
+- hosts localhost
+  tasks
+    - name get cluster config
+      command aws eks update-kubeconfig --name {{ cluster_name }} --region us-east-1
+      changed_when false
+
+    - name install helm repo
+      kubernetes.core.helm_repository
+        name ingress-nginx
+        repo_url httpskubernetes.github.ioingress-nginx
+
+    - name install ingress
+      kubernetes.core.helm
+        name ingress-nginx
+        chart_ref ingress-nginxingress-nginx
+        release_namespace ingress-nginx
+        create_namespace yes
+        wait yes
+
+    - name deploy app
+      kubernetes.core.k8s
+        state present
+        definition {{ lookup('template', 'app-deployment.yml.j2')  from_yaml }}
+        namespace production
+
+۲۰️⃣ CICD Pipeline کامل
+yaml
+
+# .gitlab-ci.yml
+stages
+  - validate
+  - plan
+  - apply
+  - configure
+  - verify
+  - destroy
+
+variables
+  TF_ROOT terraformenvironments${ENV}
+  ANSIBLE_ROOT ansible
+
+.validate
+  stage validate
+  script
+    - cd $TF_ROOT && terraform fmt -check
+    - cd $TF_ROOT && terraform validate
+    - ansible-lint $ANSIBLE_ROOT
+  only
+    - merge_requests
+
+.plan
+  stage plan
+  script
+    - cd $TF_ROOT
+    - terraform init
+    - terraform plan -out=tfplan -var-file=env${ENV}.tfvars
+  artifacts
+    paths
+      - $TF_ROOTtfplan
+    expire_in 7 days
+  only
+    - merge_requests
+
+.apply
+  stage apply
+  script
+    - cd $TF_ROOT
+    - terraform init
+    - terraform apply tfplan
+    - terraform output -json  tmpoutputs.json
+  artifacts
+    paths
+      - tmpoutputs.json
+  when manual
+  only
+    - main
+
+.configure
+  stage configure
+  needs [apply]
+  before_script
+    - pip install 'ansible-core==2.17.6' boto3
+  script
+    - python scriptsupdate_inventory.py
+    - ansible-playbook -i inventory${ENV} $ANSIBLE_ROOTplaybookssite.yml
+  when manual
+
+.verify
+  stage verify
+  needs [configure]
+  script
+    - ansible-playbook -i inventory${ENV} $ANSIBLE_ROOTplaybooksverify.yml
+    - curl -sf https${DOMAIN}health  exit 1
+
+.destroy
+  stage destroy
+  script
+    - cd $TF_ROOT
+    - terraform destroy -auto-approve -var-file=env${ENV}.tfvars
+  when manual
+  only
+    - main
+
+۲۱️⃣ State Management و Secrets
+Terraform State در S3
+hcl
+
+terraform {
+  backend s3 {
+    bucket         = tf-state-prod
+    key            = infraterraform.tfstate
+    region         = us-east-1
+    encrypt        = true
+    kms_key_id     = arnawskmsus-east-1123keyabc
+    dynamodb_table = tf-lock-prod
+  }
+}
+
+DynamoDB برای Lock
+hcl
+
+resource aws_dynamodb_table tf_lock {
+  name           = tf-lock-prod
+  billing_mode   = PAY_PER_REQUEST
+  hash_key       = LockID
+  attribute {
+    name = LockID
+    type = S
+  }
+}
+
+Secrets مشترک
+Secret	Terraform	Ansible
+AWS credentials	env vars  IAM role	env vars  IAM role
+SSH keys	file() (متغیر)	vault  file
+DB passwords	random_password	vault  secret manager
+API tokens	vault provider	vault  lookup
+TLS certs	ACM  Let's Encrypt	x509_certificate
+با HashiCorp Vault
+Terraform
+hcl
+
+provider vault {
+  address = httpsvault.internal8200
+}
+
+data vault_generic_secret db {
+  path = secretdataproddb
+}
+
+resource aws_db_instance main {
+  password = data.vault_generic_secret.db.data[password]
+}
+
+Ansible
+yaml
+
+- name get db password
+  community.hashi_vault.vault_kv2_get
+    url {{ vault_addr }}
+    path proddb
+    auth_method approle
+    role_id {{ vault_role_id }}
+    secret_id {{ vault_secret_id }}
+  register db
+  no_log true
+
+- community.mysql.mysql_user
+    name app
+    password {{ db.secret.password }}
+  no_log true
+
+۲۲️⃣ Drift Detection
+Terraform
+bash
+
+terraform plan -detailed-exitcode
+# 0 = no changes
+# 1 = error
+# 2 = changes detected
+
+Ansible
+bash
+
+ansible-playbook --check --diff site.yml
+
+Combined
+yaml
+
+# drift-detection.yml
+- hosts localhost
+  tasks
+    - name terraform drift
+      command terraform plan -detailed-exitcode -var-file=prod.tfvars
+      args
+        chdir optterraform
+      register tf_plan
+      failed_when tf_plan.rc not in [0, 2]
+      changed_when tf_plan.rc == 2
+
+    - name alert if drift
+      slack
+        msg Terraform drift detected in prod!
+      when tf_plan.rc == 2
+
+- hosts all
+  tasks
+    - name ansible drift
+      ping
+      register ping_result
+      failed_when ping_result is failed
+
+Schedule
+bash
+
+# etccron.ddrift
+0 6    root ansible-playbook optdrift.yml  varlogdrift.log 2&1
+
+۲۳️⃣ Rollback و Disaster Recovery
+Terraform rollback
+bash
+
+# 1. بازگشت به commit قدیمی
+git checkout old-sha
+
+# 2. plan
+terraform plan -var-file=prod.tfvars
+
+# 3. apply
+terraform apply
+
+⚠️ مراقب rollback می‌تواند destroy resources کند.
+Ansible rollback
+bash
+
+ansible-playbook rollback.yml --limit=affected
+
+Combined rollback
+yaml
+
+- hosts localhost
+  tasks
+    - name terraform rollback
+      git
+        repo httpsgithub.comorgtf-infra.git
+        dest optterraform
+        version {{ rollback_sha }}
+        force yes
+
+    - name apply old
+      community.general.terraform
+        project_path optterraform
+        state present
+
+- hosts affected
+  tasks
+    - name ansible rollback
+      include_role
+        name rollback
+
+Backup استراتژی
+text
+
+┌───────────────────────────────┐
+│ Terraform state               │
+│ - S3 versioning + encryption  │
+│ - DynamoDB lock               │
+│ - Daily backup به bucket جدا  │
+└───────────────────────────────┘
+┌───────────────────────────────┐
+│ Ansible config                │
+│ - git (همه چیز)               │
+│ - vault (encrypted)           │
+│ - tag per release             │
+└───────────────────────────────┘
+
+۲۴️⃣ Anti-Patterns
+❌ ۱. local-exec بدون depends_on
+hcl
+
+# ❌ race condition
+resource aws_instance web {
+  provisioner local-exec {
+    command = ansible-playbook site.yml
+  }
+}
+
+hcl
+
+# ✅
+resource null_resource config {
+  depends_on = [aws_instance.web]
+  provisioner local-exec {
+    command = ansible-playbook site.yml
+  }
+}
+
+❌ ۲. Config در Terraform
+hcl
+
+# ❌ nginx config با Terraform
+resource null_resource nginx {
+  provisioner remote-exec {
+    inline = [echo 'server {}'  etcnginxnginx.conf]
+  }
+}
+
+yaml
+
+# ✅
+- name nginx config
+  template
+    src nginx.conf.j2
+    dest etcnginxnginx.conf
+  notify reload nginx
+
+❌ ۳. Provision در Ansible
+yaml
+
+# ❌ ساخت VPC با Ansible
+- amazon.aws.ec2_vpc_net
+    name my-vpc
+    cidr_block 10.0.0.016
+
+hcl
+
+# ✅
+resource aws_vpc main {
+  cidr_block = 10.0.0.016
+}
+
+❌ ۴. State مشترک
+bash
+
+# ❌ همه روی یک state
+terraform workspace select prod
+terraform apply
+
+hcl
+
+# ✅ جدا
+# terraformprod
+# terraformstaging
+
+❌ ۵. Secret در user_data
+hcl
+
+# ❌ لاگ می‌شود
+user_data = password=SuperSecret
+
+hcl
+
+# ✅
+user_data = templatefile(..., {
+  password = data.aws_secretsmanager_secret_version.pw.secret_string
+})
+
+❌ ۶. بدون lock
+hcl
+
+# ❌ بدون DynamoDB
+terraform { backend s3 { bucket = ... } }
+
+hcl
+
+# ✅
+terraform {
+  backend s3 {
+    bucket         = ...
+    dynamodb_table = tf-lock
+  }
+}
+
+❌ ۷. بدون version pin
+hcl
+
+# ❌
+module vpc {
+  source = terraform-aws-modulesvpcaws
+}
+
+hcl
+
+# ✅
+module vpc {
+  source  = terraform-aws-modulesvpcaws
+  version = 5.1.0
+}
+
+۲۵️⃣ Best Practices
+معماری
+
+    Terraform = infrastructure, Ansible = config
+
+    State جدا per environment (prod  staging  dev)
+
+    Backend remote با lock (S3 + DynamoDB یا TFC)
+
+    Pipeline یکپارچه (validate → plan → apply → configure → verify)
+
+    Inventory تولیدشده از Terraform state (نه hardcode)
+
+Terraform
+
+    Module pin شده (version = x.y.z)
+
+    terraform fmt + terraform validate در CI
+
+    terraform plan -out + review
+
+    tflint + checkov برای security scan
+
+    sensitive = true برای outputs حساس
+
+    prevent_destroy برای resourceهای حیاتی
+
+    Workspaces یا دایرکتوری جدا برای هر env
+
+Ansible
+
+    --check --diff در staging
+
+    serial برای rolling
+
+    no_log true روی secrets
+
+    validate در config
+
+    Idempotency test (دو بار → changed=0)
+
+    ansible-lint --profile production
+
+Integration
+
+    Inventory از Terraform (dynamic یا generated)
+
+    Secret manager مشترک (Vault  AWS SM)
+
+    null_resource + triggers نه local-exec خالی
+
+    Bash script جدا برای complex logic
+
+    Drift detection (هر ۶ ساعت)
+
+Security
+
+    State encrypt (S3 SSE-KMS)
+
+    State lock (DynamoDB)
+
+    Access control (IAM role  OIDC)
+
+    No secrets in user_data (استفاده از SSMSecrets Manager)
+
+    Vault برای هر دو (Ansible + Terraform)
+
+    Audit log روی applyconfigure
+
+    RBAC روی state bucket و ansible control node
+
+Operations
+
+    Tag همه چیز (Environment, ManagedBy=Terraform, Role)
+
+    Monitoring (CloudWatch + Prometheus)
+
+    Runbook برای هر pipeline
+
+    Rollback plan در هر PR
+
+    Cost tagging (FinOps)
+
+۲۶️⃣ مقایسه ابزارها
+Terraform vs جایگزین‌ها
+ابزار	زبان	State	مزیت	عیب
+Terraform	HCL	✅	ecosystem بزرگ	license (BSL از 1.6)
+OpenTofu	HCL	✅	OSS fork	community کوچک‌تر
+Pulumi	PythonTSGo	✅	زبان واقعی	یادگیری
+CloudFormation	YAML	✅	AWS native	فقط AWS
+Ansible	YAML	❌	simple	نه برای provisioning پیچیده
+Crossplane	YAML	✅ (k8s)	K8s native	نیاز k8s
+Ansible vs جایگزین‌ها
+ابزار	زبان	Agent	مزیت	عیب
+Ansible	YAML	❌	agentless	performance
+Chef	Ruby	✅	full lifecycle	agent
+Puppet	DSL	✅	mature	agent
+Salt	PythonYAML	✅❌	fast	پیچیده
+Landscape مدرن
+text
+
+Provisioning              Configuration
+├── Terraform             ├── Ansible
+├── OpenTofu              ├── Chef
+├── Pulumi                ├── Puppet
+└── Crossplane            └── Salt
+
+Container                 Orchestration
+├── Docker                ├── Kubernetes
+└── Podman                ├── Nomad
+                          └── Swarm
+
+📊 جدول تصمیم نهایی
+سناریو	ابزار
+ساخت VPC  VNet	Terraform
+ساخت EC2  VM	Terraform
+ساخت RDS  DB	Terraform
+ساخت S3  GCS	Terraform
+IAM  RBAC	Terraform
+DNS (Route53)	Terraform
+SSL (ACM)	Terraform
+Nginx install	Ansible
+Nginx config	Ansible
+User  SSH keys	Ansible
+App deployment	Ansible
+DB schema migration	Ansible
+Certbot  Let's Encrypt	Ansible
+Systemd service	Ansible
+Monitoring agent	Ansible
+Log shipping	Ansible
+OS hardening	Ansible
+Container build	CI (Docker)
+K8s apps	Helm  Ansible
+K8s cluster	Terraform
+🎓 ۱۰ قانون طلایی برای Ansible + Terraform
+
+    Terraform بساز، Ansible پیکربندی کن — تفکیک مسئولیت
+
+    State جدا per env — prod هرگز با staging قاطی نشود
+
+    Inventory از Terraform state — نه hardcode
+
+    null_resource + triggers — نه local-exec بدون context
+
+    Secret manager مشترک (Vault) — نه plaintext
+
+    terraform plan در PR — قبل از apply
+
+    --check --diff در staging — قبل از prod
+
+    Idempotency در هر دو — test شده
+
+    Drift detection — هر ۶ ساعت
+
+    Rollback plan — در هر PR
+
+🎯 Workflow کامل (خلاصه)
+text
+
+┌─────────────────────────────────────────────────────┐
+│  1. Developer writes .tf + .yml                     │
+│     ↓ git push                                       │
+├─────────────────────────────────────────────────────┤
+│  2. CI terraform fmt, validate, plan                │
+│     CI ansible-lint, --syntax-check                 │
+│     ↓ PR review                                      │
+├─────────────────────────────────────────────────────┤
+│  3. PR merge                                         │
+│     ↓                                                 │
+├─────────────────────────────────────────────────────┤
+│  4. Manual trigger terraform apply                  │
+│     ↓                                                 │
+├─────────────────────────────────────────────────────┤
+│  5. terraform output → inventory                    │
+│     ↓                                                 │
+├─────────────────────────────────────────────────────┤
+│  6. ansible-playbook --check --diff (staging)       │
+│     ↓                                                 │
+├─────────────────────────────────────────────────────┤
+│  7. ansible-playbook (production)                    │
+│     ↓                                                 │
+├─────────────────────────────────────────────────────┤
+│  8. Verify health checks, smoke tests              │
+│     ↓                                                 │
+├─────────────────────────────────────────────────────┤
+│  9. Monitoring drift detection (cron)              │
+│     ↓                                                 │
+├─────────────────────────────────────────────────────┤
+│  10. If drift alert → investigate → fix             │
+└─────────────────────────────────────────────────────┘
+
+🔗 منابع و لینک‌ها
+text
+
+docs.ansible.com
+developer.hashicorp.comterraform
+registry.terraform.io              (providers, modules)
+galaxy.ansible.com                 (collections)
+github.comterraform-aws-modules
+github.comansible-collections
+
+Terraform Cloud  Enterprise
+HashiCorp Vault
+Spacelift  Env0  Scalr           (Terraform automation)
+Atlantis                            (PR-based Terraform)
+Terragrunt                          (DRY Terraform)
+

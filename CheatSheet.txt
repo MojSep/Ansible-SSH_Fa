@@ -1,0 +1,2197 @@
+﻿🎯 چیت‌شیت جامع Ansible برای مهندسین DevOps و زیرساخت
+
+    راهنمای مرجع سریع، دقیق و فنی — از نصب تا عیب‌یابی، با مثال‌های عملی. برای چاپ و استفاده روزمره بهینه‌سازی شده.
+
+📑 فهرست
+text
+
+۱.  نصب و راه‌اندازی سریع
+۲.  دستورات CLI (خلاصه)
+۳.  ansible.cfg — تنظیمات کلیدی
+۴.  Inventory
+۵.  ساختار Playbook
+۶.  متغیرها و Precedence
+۷.  Facts
+۸.  ماژول‌های پرکاربرد
+۹.  Jinja2 فیلترها و تست‌ها
+۱۰. Loop و Condition
+۱۱. Blocks و Error Handling
+۱۲. Handlers
+۱۳. Roles و Collections
+۱۴. Vault
+۱۵. Delegation و Strategy
+۱۶. Troubleshooting
+۱۷. Security Best Practices
+۱۸. الگوهای رایج (Patterns)
+۱۹. Anti-patterns
+۲۰. Cheat Sheet یک‌خطی‌ها
+
+۱️⃣ نصب و راه‌اندازی سریع
+نصب (Production)
+bash
+
+# روش توصیه‌شده
+python3 -m venv /opt/ansible-venv
+source /opt/ansible-venv/bin/activate
+pip install --upgrade pip setuptools wheel
+pip install 'ansible-core==2.17.6'
+
+ساختار پروژه استاندارد
+text
+
+project/
+├── ansible.cfg
+├── inventory/
+│   ├── production/hosts.yml
+│   ├── production/group_vars/
+│   └── production/host_vars/
+├── playbooks/
+│   ├── site.yml
+│   └── deploy.yml
+├── roles/
+│   └── myrole/
+│       ├── defaults/main.yml
+│       ├── vars/main.yml
+│       ├── tasks/main.yml
+│       ├── handlers/main.yml
+│       ├── templates/
+│       ├── files/
+│       ├── meta/main.yml
+│       └── tests/
+├── collections/
+│   └── requirements.yml
+└── group_vars/all.yml
+
+Smoke Test
+bash
+
+ansible --version
+ansible localhost -m ping
+ansible-doc -l | head
+ansible-config dump --only-changed
+
+۲️⃣ دستورات CLI (خلاصه)
+ansible — Ad-hoc
+bash
+
+ansible all -m ping
+ansible web -m command -a "uptime"
+ansible all -b -m apt -a "name=nginx state=present"
+ansible all -m setup -a "filter=ansible_*ipv4*"
+ansible all -m copy -a "src=/tmp/x dest=/etc/y mode=0644"
+ansible all -m shell -a "systemctl restart nginx" -b
+ansible all -m ping -i inventory -u deploy --private-key key -vvv
+
+ansible-playbook
+bash
+
+ansible-playbook site.yml
+ansible-playbook site.yml --syntax-check
+ansible-playbook site.yml --check --diff
+ansible-playbook site.yml --list-tasks
+ansible-playbook site.yml --list-hosts
+ansible-playbook site.yml --list-tags
+ansible-playbook site.yml --tags deploy -e @vars/prod.yml
+ansible-playbook site.yml --skip-tags test
+ansible-playbook site.yml --limit web01:web02
+ansible-playbook site.yml --start-at-task "Deploy"
+ansible-playbook site.yml -vvv --step
+ansible-playbook site.yml --vault-password-file=~/.vault_pass
+ansible-playbook site.yml -K -b
+ansible-playbook site.yml --limit @site.retry
+
+ansible-galaxy
+bash
+
+ansible-galaxy role init myrole
+ansible-galaxy role install geerlingguy.nginx
+ansible-galaxy role install -r requirements.yml -p roles/
+ansible-galaxy role list
+ansible-galaxy collection install community.general
+ansible-galaxy collection install -r requirements.yml -p ./collections
+ansible-galaxy collection list
+ansible-galaxy collection verify community.general
+
+ansible-vault
+bash
+
+ansible-vault create secrets.yml
+ansible-vault encrypt secrets.yml
+ansible-vault decrypt secrets.yml
+ansible-vault edit secrets.yml
+ansible-vault view secrets.yml
+ansible-vault rekey secrets.yml
+ansible-vault encrypt_string 'secret' --name 'db_pass'
+
+ansible-config
+bash
+
+ansible-config dump
+ansible-config dump --only-changed
+ansible-config view
+ansible-config list
+ansible-config init --disabled > ansible.cfg
+
+ansible-doc
+bash
+
+ansible-doc -l
+ansible-doc copy
+ansible-doc -s copy
+ansible-doc -t lookup file
+ansible-doc -t filter ipaddr
+ansible-doc -t connection ssh
+
+ansible-inventory
+bash
+
+ansible-inventory -i inv --list
+ansible-inventory -i inv --graph
+ansible-inventory -i inv --graph --vars
+ansible-inventory -i inv --host web01
+ansible-inventory -i inv --list --yaml
+ansible-inventory -i inv --list --output=inv.json
+
+ansible-console
+bash
+
+ansible-console -i inv all
+# داخل کنسول: ping / cd web01 / command uptime / exit
+
+ansible-pull
+bash
+
+ansible-pull -U https://github.com/org/repo.git -C production \
+  -i localhost, -l localhost -d /var/lib/ansible/local site.yml
+
+۳️⃣ ansible.cfg — تنظیمات کلیدی
+قالب Production امن
+ini
+
+[defaults]
+inventory              = /etc/ansible/inventory
+roles_path             = /etc/ansible/roles
+collections_path       = /etc/ansible/collections
+remote_user            = deploy
+host_key_checking      = True
+transport              = smart
+interpreter_python     = /usr/bin/python3
+inject_facts_as_vars   = False
+hash_behaviour         = replace
+error_on_undefined_vars = True
+allow_unsafe_lookups   = False
+allow_world_readable_tmpfiles = False
+stdout_callback        = yaml
+callbacks_enabled      = profile_tasks, timer
+log_path               = /var/log/ansible.log
+gathering              = smart
+gather_subset          = min,network,virtual
+fact_caching           = jsonfile
+fact_caching_connection = /var/cache/ansible/facts
+fact_caching_timeout   = 7200
+forks                  = 20
+retry_files_enabled    = True
+show_task_path_on_failure = True
+
+[privilege_escalation]
+become                 = False
+become_method          = sudo
+become_user            = root
+become_flags           = -H -S -n
+become_ask_pass        = False
+
+[ssh_connection]
+pipelining             = True
+ssh_args               = -C -o ControlMaster=auto -o ControlPersist=300s -o PreferredAuthentications=publickey -o PasswordAuthentication=no -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/ssh/ssh_known_hosts -o ConnectTimeout=15
+ssh_executable         = /usr/bin/ssh
+control_path_dir       = ~/.ansible/cp
+ssh_transfer_method    = piped
+scp_if_ssh             = False
+sftp_batch_mode        = True
+
+[galaxy]
+server                 = https://galaxy.ansible.com
+ignore_certs           = False
+display_progress       = True
+
+[inventory]
+enable_plugins         = yaml, ini
+unparsed_is_failed     = True
+
+اولویت‌های کانفیگ (بالا → پایین)
+text
+
+1. ANSIBLE_* environment variables
+2. CLI args (-i, -u, --private-key, ...)
+3. $ANSIBLE_CONFIG
+4. ./ansible.cfg
+5. ~/.ansible.cfg
+6. /etc/ansible/ansible.cfg
+
+متغیرهای محیطی مهم
+bash
+
+ANSIBLE_CONFIG
+ANSIBLE_INVENTORY
+ANSIBLE_VAULT_PASSWORD_FILE
+ANSIBLE_REMOTE_USER
+ANSIBLE_PRIVATE_KEY_FILE
+ANSIBLE_HOST_KEY_CHECKING
+ANSIBLE_STDOUT_CALLBACK
+ANSIBLE_LOG_PATH
+ANSIBLE_FORKS
+ANSIBLE_PIPELINING
+ANSIBLE_NOCOLOR
+ANSIBLE_COLLECTIONS_PATH
+ANSIBLE_ROLES_PATH
+ANSIBLE_SSH_ARGS
+ANSIBLE_DEBUG
+ANSIBLE_KEEP_REMOTE_FILES
+
+۴️⃣ Inventory
+INI
+ini
+
+[webservers]
+web01 ansible_host=10.0.0.1 ansible_user=deploy
+web02 ansible_host=10.0.0.2 ansible_port=2222
+
+[webservers:vars]
+http_port=80
+ansible_python_interpreter=/usr/bin/python3
+
+[dbservers]
+db01 ansible_host=10.0.0.10
+
+[prod:children]
+webservers
+dbservers
+
+[prod:vars]
+env=production
+
+YAML
+yaml
+
+all:
+  children:
+    webservers:
+      hosts:
+        web01:
+          ansible_host: 10.0.0.1
+          ansible_user: deploy
+        web02:
+          ansible_host: 10.0.0.2
+      vars:
+        http_port: 80
+    dbservers:
+      hosts:
+        db01:
+          ansible_host: 10.0.0.10
+
+دایرکتوری
+text
+
+inventory/prod/
+├── hosts.yml
+├── group_vars/
+│   ├── all.yml
+│   ├── all/vars.yml, vault.yml
+│   └── webservers.yml
+└── host_vars/
+    └── web01.yml
+
+Dynamic (AWS)
+yaml
+
+# inventory/aws_ec2.yml
+plugin: amazon.aws.aws_ec2
+regions: [us-east-1]
+filters:
+  tag:Environment: production
+  instance-state-name: running
+keyed_groups:
+  - key: tags.Role
+    prefix: role
+  - key: placement.region
+    prefix: region
+hostnames:
+  - tag:Name
+compose:
+  ansible_host: private_ip_address
+
+پترن‌ها
+bash
+
+all                        # همه
+*                          # همه
+web01                      # یک هاست
+web*                       # wildcard
+webservers:dbservers       # OR
+webservers:&prod           # AND
+webservers:!web01          # NOT
+~(web|db).*\.example\.com  # regex
+@retry.txt                 # از فایل
+
+۵️⃣ ساختار Playbook
+اسکلت
+yaml
+
+---
+- name: play name
+  hosts: webservers
+  become: true
+  gather_facts: true
+  serial: "20%"
+  max_fail_percentage: 10
+  any_errors_fatal: false
+  strategy: linear
+  order: inventory
+  vars:
+    http_port: 80
+  vars_files:
+    - vars/common.yml
+  vars_prompt:
+    - name: deploy_version
+      prompt: "Version?"
+      private: false
+  pre_tasks:
+    - name: check
+      assert: { that: [ "ansible_os_family == 'Debian'" ] }
+  roles:
+    - role: common
+      tags: [common]
+    - role: nginx
+      vars: { nginx_port: 80 }
+  tasks:
+    - name: task
+      module: args
+  post_tasks:
+    - name: notify
+      debug: msg="done"
+  handlers:
+    - name: restart nginx
+      systemd: { name: nginx, state: restarted }
+
+Task کامل
+yaml
+
+- name: descriptive name
+  ansible.builtin.copy:
+    src: file.conf
+    dest: /etc/app/file.conf
+    owner: root
+    group: root
+    mode: '0644'
+    backup: yes
+    validate: 'nginx -t -c %s'
+  become: true
+  become_user: root
+  when: ansible_os_family == "Debian"
+  loop: "{{ items }}"
+  loop_control:
+    label: "{{ item.name }}"
+    index_var: idx
+  register: result
+  until: result is success
+  retries: 3
+  delay: 5
+  changed_when: result.changed
+  failed_when: result.rc != 0
+  notify: restart nginx
+  tags: [config, nginx]
+  no_log: false
+  ignore_errors: false
+  delegate_to: localhost
+  run_once: true
+  environment:
+    HTTP_PROXY: "{{ proxy }}"
+  async: 60
+  poll: 5
+  throttle: 1
+
+۶️⃣ متغیرها و Precedence
+منابع (از کم به زیاد)
+text
+
+1.  role defaults/main.yml
+2.  inventory file/script group vars
+3.  inventory group_vars/all
+4.  playbook group_vars/all
+5.  inventory group_vars/* (specific)
+6.  playbook group_vars/*
+7.  inventory host_vars/*
+8.  playbook host_vars/*
+9.  host facts / cached set_facts
+10. play vars
+11. play vars_prompt
+12. play vars_files
+13. role vars/main.yml
+14. block vars
+15. task vars
+16. include_vars
+17. set_facts / registered vars
+18. role (and include_role) params
+19. include params
+20. extra vars (-e) ⚠️ ALWAYS WINS
+
+انواع
+yaml
+
+# string, int, bool
+my_str: "hello"
+my_int: 42
+my_bool: true
+
+# list
+my_list: [a, b, c]
+
+# dict
+my_dict:
+  key1: val1
+  key2: val2
+
+# multiline
+my_text: |
+  line1
+  line2
+
+# folded
+my_text: >
+  line1 line2
+
+# null
+my_null: null
+
+# reference
+ref: "{{ my_dict.key1 }}"
+
+# concatenate
+path: "{{ base }}/{{ sub }}"
+
+# default
+safe: "{{ undefined_var | default('fallback') }}"
+
+set_fact و register
+yaml
+
+- name: register output
+  command: /bin/echo hello
+  register: result
+
+- debug: var=result.stdout
+
+- set_fact:
+    is_debian: "{{ ansible_os_family == 'Debian' }}"
+
+- set_fact:
+    combined: "{{ dict1 | combine(dict2, recursive=True) }}"
+
+- set_fact:
+    cacheable: yes    # ذخیره در fact cache
+
+Scope
+yaml
+
+# host-scoped
+- set_fact: my_var=value
+
+# play-scoped (all hosts)
+- set_fact:
+    cluster_nodes: "{{ groups['all'] | map('extract', hostvars, 'ansible_host') | list }}"
+
+# shared via hostvars
+- debug:
+    var: hostvars['web01']['ansible_default_ipv4']['address']
+
+۷️⃣ Facts
+دسترسی
+yaml
+
+{{ ansible_facts['distribution'] }}      # nested (جدید)
+{{ ansible_distribution }}                # flat (قدیمی)
+{{ ansible_facts['default_ipv4']['address'] }}
+{{ ansible_memtotal_mb }}
+{{ ansible_processor_vcpus }}
+{{ ansible_os_family }}
+{{ ansible_distribution_major_version }}
+{{ ansible_mounts }}
+{{ ansible_interfaces }}
+{{ ansible_selinux.status }}
+{{ ansible_virtualization_type }}
+{{ ansible_fqdn }}
+{{ ansible_hostname }}
+{{ ansible_env.HOME }}
+{{ ansible_user_id }}
+
+جمع‌آوری selective
+yaml
+
+- setup:
+    gather_subset: ['!all', '!hardware', 'network']
+    filter: 'ansible_*ipv4*'
+
+Fact فایل
+yaml
+
+- hosts: all
+  gather_facts: no
+  tasks:
+    - setup:
+        gather_subset: min
+
+Local facts
+json
+
+// /etc/ansible/facts.d/myapp.fact
+{"version": "1.2.3", "env": "prod"}
+
+yaml
+
+{{ ansible_facts['local']['myapp']['version'] }}
+{{ ansible_local.myapp.version }}
+
+دسته‌های اصلی
+text
+
+min          ← OS, hostname, network
+network      ← interfaces, IPs
+hardware     ← CPU, memory, disks
+virtual      ← virtualization
+all          ← همه
+!all,!min    ← استثنا
+
+چک‌های پرکاربرد
+yaml
+
+when: ansible_os_family == "Debian"
+when: ansible_distribution == "Ubuntu" and ansible_distribution_major_version | int >= 22
+when: ansible_virtualization_type == "docker"
+when: ansible_service_mgr == "systemd"
+when: ansible_selinux.status == "enabled"
+when: ansible_python_version is version('3.8', '>=')
+when: ansible_memtotal_mb >= 4096
+
+۸️⃣ ماژول‌های پرکاربرد
+Files & Content
+copy
+yaml
+
+- copy:
+    src: local.conf
+    dest: /etc/app/config
+    mode: '0644'
+    owner: root
+    group: root
+    backup: yes
+    validate: 'nginx -t -c %s'
+- copy:
+    content: "{{ config_content }}"
+    dest: /etc/app/config
+- copy:
+    src: /etc/app/
+    dest: /opt/backup/
+    remote_src: yes
+
+template (Jinja2)
+yaml
+
+- template:
+    src: nginx.conf.j2
+    dest: /etc/nginx/nginx.conf
+    mode: '0644'
+    validate: 'nginx -t -c %s'
+    backup: yes
+
+file
+yaml
+
+- file: { path: /etc/app, state: directory, mode: '0755' }
+- file: { path: /etc/app/old, state: absent }
+- file: { src: /etc/app/a, dest: /etc/app/b, state: link, force: yes }
+- file: { path: /tmp/x, state: touch, modification_time: preserve, access_time: preserve }
+
+lineinfile
+yaml
+
+- lineinfile:
+    path: /etc/ssh/sshd_config
+    regexp: '^PermitRootLogin'
+    line: 'PermitRootLogin no'
+    state: present
+    backup: yes
+    validate: 'sshd -t -f %s'
+
+blockinfile
+yaml
+
+- blockinfile:
+    path: /etc/ssh/sshd_config
+    marker: "# {mark} ANSIBLE MANAGED BLOCK"
+    block: |
+      PermitRootLogin no
+      PasswordAuthentication no
+
+replace
+yaml
+
+- replace:
+    path: /etc/app/config
+    regexp: '^oldvalue=(.*)$'
+    replace: 'newvalue=\1'
+    backup: yes
+
+fetch
+yaml
+
+- fetch:
+    src: /var/log/app.log
+    dest: /backup/{{ inventory_hostname }}/
+    flat: no
+    fail_on_missing: no
+
+Package Managers
+apt
+yaml
+
+- apt:
+    name: [nginx, curl, git]
+    state: present
+    update_cache: yes
+    cache_valid_time: 3600
+- apt: { name: nginx, state: latest, autoremove: yes }
+- apt: { name: nginx, state: absent, purge: yes }
+- apt: { deb: /tmp/pkg.deb }
+
+yum / dnf
+yaml
+
+- dnf:
+    name: nginx
+    state: present
+    enablerepo: epel
+- dnf: { name: "@Development Tools", state: present }
+- yum: { name: nginx, state: latest, update_cache: yes }
+
+package (generic)
+yaml
+
+- package: { name: nginx, state: present }
+
+pip
+yaml
+
+- pip: { name: boto3, version: '1.34.0', virtualenv: /opt/venv }
+- pip: { requirements: /tmp/requirements.txt }
+
+gem / npm
+yaml
+
+- gem: { name: rails, state: present }
+- npm: { name: pm2, global: yes }
+
+Services
+service / systemd
+yaml
+
+- service: { name: nginx, state: restarted }
+- systemd: { name: nginx, state: started, enabled: yes, daemon_reload: yes }
+- systemd: { name: nginx, state: stopped, masked: yes }
+
+service_facts
+yaml
+
+- service_facts:
+- debug: var=ansible_facts.services['nginx.service']['state']
+
+Users & Auth
+user
+yaml
+
+- user:
+    name: deploy
+    uid: 1001
+    groups: [sudo, docker]
+    shell: /bin/bash
+    home: /home/deploy
+    create_home: yes
+    generate_ssh_key: yes
+    ssh_key_bits: 4096
+    ssh_key_type: ed25519
+    password: "{{ 'pass' | password_hash('sha512', 'salt') }}"
+    state: present
+- user: { name: old, state: absent, remove: yes }
+
+group
+yaml
+
+- group: { name: devs, gid: 1001, state: present }
+
+authorized_key
+yaml
+
+- authorized_key:
+    user: deploy
+    key: "{{ lookup('file', 'pubkeys/deploy.pub') }}"
+    state: present
+    exclusive: no
+- authorized_key:
+    user: deploy
+    key: "{{ item }}"
+  loop: "{{ keys }}"
+
+sudoers
+yaml
+
+- copy:
+    content: "deploy ALL=(ALL) NOPASSWD: /usr/bin/systemctl\n"
+    dest: /etc/sudoers.d/deploy
+    mode: '0440'
+    validate: 'visudo -cf %s'
+
+Network & Firewall
+firewalld
+yaml
+
+- firewalld: { service: http, permanent: yes, state: enabled, immediate: yes }
+- firewalld: { port: 8080/tcp, permanent: yes, state: enabled }
+
+ufw
+yaml
+
+- ufw: { rule: allow, port: '22', proto: tcp }
+- ufw: { default: deny, direction: incoming }
+- ufw: { state: enabled }
+
+iptables
+yaml
+
+- iptables: { chain: INPUT, protocol: tcp, destination_port: 22, jump: ACCEPT }
+
+Docker
+docker_image
+yaml
+
+- community.docker.docker_image:
+    name: nginx
+    tag: "1.25"
+    source: pull
+
+docker_container
+yaml
+
+- community.docker.docker_container:
+    name: myapp
+    image: myapp:1.0
+    state: started
+    ports: ["8080:80"]
+    volumes: ["/data:/app/data"]
+    env:
+      ENV: production
+    restart_policy: always
+
+docker_compose
+yaml
+
+- community.docker.docker_compose:
+    project_src: /opt/app
+    state: present
+
+Cloud (samples)
+AWS EC2
+yaml
+
+- amazon.aws.ec2_instance:
+    name: web01
+    instance_type: t3.micro
+    image_id: ami-xxx
+    key_name: deploy
+    security_group: web-sg
+    region: us-east-1
+    wait: yes
+    state: running
+
+AWS S3
+yaml
+
+- amazon.aws.s3_object:
+    bucket: mybucket
+    object: path/file
+    src: /tmp/file
+    mode: put
+
+Azure
+yaml
+
+- azure.azcollection.azure_rm_virtualmachine:
+    resource_group: rg1
+    name: vm1
+    vm_size: Standard_B1s
+    admin_username: azureuser
+
+Kubernetes
+yaml
+
+- kubernetes.core.k8s:
+    state: present
+    src: /manifests/deployment.yml
+    namespace: default
+- kubernetes.core.k8s:
+    api_version: v1
+    kind: Namespace
+    name: myns
+    state: present
+
+Utilities
+command / shell
+yaml
+
+- command: /usr/bin/systemctl status nginx
+- command: { cmd: "/usr/bin/redis-cli ping", creates: /tmp/redis-ok }
+- shell: "ps aux | grep {{ process }} | awk '{print $2}'"
+  register: pids
+- command: /usr/local/bin/migrate
+  args: { chdir: /opt/app }
+
+debug
+yaml
+
+- debug: { var: my_var }
+- debug: { msg: "Value: {{ my_var }}" }
+- debug: { var: result, verbosity: 2 }
+
+assert
+yaml
+
+- assert:
+    that:
+      - ansible_memtotal_mb >= 4096
+      - ansible_distribution == "Ubuntu"
+    fail_msg: "Requirements not met"
+    success_msg: "OK"
+
+fail
+yaml
+
+- fail: { msg: "Aborting: unsupported OS" }
+  when: ansible_os_family != "Debian"
+
+pause
+yaml
+
+- pause: { seconds: 30 }
+- pause: { prompt: "Press Enter to continue", minutes: 5 }
+
+wait_for
+yaml
+
+- wait_for: { port: 22, host: "{{ inventory_hostname }}", delay: 5, timeout: 300 }
+- wait_for: { path: /var/log/app.log, search_regex: "started", timeout: 120 }
+
+uri (HTTP)
+yaml
+
+- uri:
+    url: "http://localhost/health"
+    method: GET
+    status_code: 200
+    timeout: 10
+    return_content: yes
+  register: health
+  retries: 5
+  delay: 3
+  until: health.status == 200
+- uri:
+    url: "https://api.example.com/v1/data"
+    method: POST
+    body_format: json
+    body: { "key": "value" }
+    headers:
+      Authorization: "Bearer {{ token }}"
+    validate_certs: yes
+  no_log: true
+
+get_url
+yaml
+
+- get_url:
+    url: https://example.com/file.tar.gz
+    dest: /tmp/file.tar.gz
+    checksum: sha256:abc123...
+    mode: '0644'
+
+synchronize (rsync)
+yaml
+
+- synchronize:
+    src: /local/
+    dest: /remote/
+    mode: push
+    delete: yes
+    rsync_opts: ["--exclude=.git"]
+  delegate_to: "{{ inventory_hostname }}"
+
+cron
+yaml
+
+- cron:
+    name: backup
+    minute: "0"
+    hour: "2"
+    job: /usr/local/bin/backup.sh
+    user: root
+    state: present
+
+mount
+yaml
+
+- mount:
+    path: /mnt/data
+    src: /dev/sdb1
+    fstype: ext4
+    opts: defaults
+    state: mounted
+
+git
+yaml
+
+- git:
+    repo: https://github.com/org/repo.git
+    dest: /opt/repo
+    version: main
+    force: yes
+    depth: 1
+
+stat
+yaml
+
+- stat: { path: /etc/app/config }
+  register: st
+- debug: msg="exists" 
+  when: st.stat.exists
+
+find
+yaml
+
+- find:
+    paths: /var/log
+    patterns: "*.log"
+    age: 7d
+  register: old_logs
+- file: { path: "{{ item.path }}", state: absent }
+  loop: "{{ old_logs.files }}"
+
+slurp (read remote file)
+yaml
+
+- slurp: { src: /etc/app/config }
+  register: content
+- debug: msg="{{ content.content | b64decode }}"
+
+Security
+selinux / seboolean / sefcontext
+yaml
+
+- seboolean: { name: httpd_can_network_connect, state: yes, persistent: yes }
+- sefcontext: { target: '/var/www(/.*)?', setype: httpd_sys_content_t, state: present }
+- command: restorecon -Rv /var/www
+  changed_when: false
+- selinux: { state: enforcing, policy: targeted }
+
+Messaging
+slack
+yaml
+
+- community.general.slack:
+    token: "{{ slack_token }}"
+    msg: "Deploy completed: {{ version }}"
+    channel: "#deploys"
+
+mail
+yaml
+
+- mail:
+    to: ops@example.com
+    subject: "Deploy {{ env }}"
+    body: "Completed"
+
+۹️⃣ Jinja2 فیلترها و تست‌ها
+فیلترهای پرکاربرد
+jinja2
+
+{{ var | default('fallback') }}
+{{ var | default(omit) }}
+{{ list | join(',') }}
+{{ list | length }}
+{{ list | first }}
+{{ list | last }}
+{{ list | unique }}
+{{ list | sort }}
+{{ list | reverse }}
+{{ list | min }}
+{{ list | max }}
+{{ list | sum }}
+{{ list | flatten }}
+{{ list | select('match', '^web') | list }}
+{{ list | reject('match', '^db') | list }}
+{{ list | selectattr('state', 'equalto', 'running') | list }}
+{{ list | map(attribute='name') | list }}
+{{ list | map('regex_replace', '^web', 'srv') | list }}
+{{ dict | dict2items }}
+{{ list_of_dicts | items2dict }}
+{{ dict1 | combine(dict2, recursive=True, list_merge='append') }}
+{{ string | upper }}
+{{ string | lower }}
+{{ string | title }}
+{{ string | trim }}
+{{ string | regex_replace('\\s+', '_') }}
+{{ string | regex_search('v(\\d+)', '\\1') }}
+{{ string | basename }}
+{{ string | dirname }}
+{{ string | splitext }}
+{{ path | realpath }}
+{{ 'secret' | password_hash('sha512', 'salt') }}
+{{ 'secret' | b64encode }}
+{{ encoded | b64decode }}
+{{ dict | to_json }}
+{{ dict | to_nice_json }}
+{{ dict | to_yaml }}
+{{ dict | to_nice_yaml }}
+{{ int | int }}
+{{ str | int(base=16) }}
+{{ num | float }}
+{{ num | round(2) }}
+{{ num | abs }}
+{{ bool | bool }}
+{{ path | expanduser }}
+{{ datetime | strftime('%Y-%m-%d') }}
+{{ now() }}
+{{ now(fmt='%Y%m%d') }}
+{{ 1024 | filesizeformat }}
+{{ ip | ipaddr }}
+{{ ip | ipv4 }}
+{{ ip | ipv6 }}
+{{ hostname | ipwrap }}
+{{ list | random }}
+{{ list | shuffle }}
+{{ big_list | batch(10) | list }}
+{{ list | zip(other_list) | list }}
+{{ dict | json_query('items[?state==`running`].name') }}
+{{ '/etc/app' | mandatory }}
+{{ result | ternary('yes', 'no') }}
+{{ dict | dictsort }}
+
+تست‌ها (when)
+yaml
+
+when: var is defined
+when: var is undefined
+when: var is none
+when: var is truthy
+when: var is falsy
+when: var is string
+when: var is number
+when: var is iterable
+when: var is mapping
+when: var is sequence
+when: var is boolean
+when: var is directory
+when: var is file
+when: var is exists
+when: var is link
+when: var is abs
+when: var is same_file(other)
+when: var is version('1.2.3', '>=')
+when: var is version_compare('1.2.3', '>=')
+when: var is subset(other_list)
+when: var is superset(other_list)
+when: var is match('regex')
+when: var is search('regex')
+when: var is regex('pattern')
+when: result is changed
+when: result is failed
+when: result is success
+when: result is skipped
+when: result is unreachable
+when: result is not failed
+when: result.rc == 0
+
+۱۰️⃣ Loop و Condition
+Loop
+yaml
+
+- name: simple
+  debug: { msg: "{{ item }}" }
+  loop: [1, 2, 3]
+
+- name: list
+  debug: { msg: "{{ item }}" }
+  loop: "{{ my_list }}"
+
+- name: dict
+  debug: { msg: "{{ item.key }}={{ item.value }}" }
+  loop: "{{ my_dict | dict2items }}"
+
+- name: nested
+  debug: { msg: "{{ item.0 }}-{{ item.1 }}" }
+  loop: "{{ list1 | product(list2) | list }}"
+
+- name: with_index
+  debug: { msg: "{{ idx }}: {{ item }}" }
+  loop: "{{ items }}"
+  loop_control:
+    index_var: idx
+
+- name: with_label
+  debug: { msg: "{{ item.name }}" }
+  loop: "{{ users }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: until success
+  command: /usr/local/bin/try.sh
+  register: r
+  until: r.rc == 0
+  retries: 5
+  delay: 3
+
+- name: pause between
+  command: /usr/local/bin/process
+  loop: "{{ items }}"
+  loop_control:
+    pause: 2
+
+- name: complex
+  template:
+    src: "{{ item.src }}"
+    dest: "{{ item.dest }}"
+  loop:
+    - { src: "a.j2", dest: "/etc/a" }
+    - { src: "b.j2", dest: "/etc/b" }
+  loop_control:
+    label: "{{ item.dest }}"
+
+Condition
+yaml
+
+- debug: msg="Debian"
+  when: ansible_os_family == "Debian"
+
+- debug: msg="multi"
+  when:
+    - ansible_os_family == "Debian"
+    - ansible_distribution_major_version | int >= 22
+
+- debug: msg="or"
+  when: env == "prod" or env == "staging"
+
+- debug: msg="not"
+  when: not skip_install
+
+- debug: msg="in"
+  when: "'web' in group_names"
+
+- command: /usr/bin/migrate
+  when: result is changed
+
+- include_tasks: debian.yml
+  when: ansible_os_family == "Debian"
+
+- import_tasks: common.yml    # static, always processed
+
+۱۱️⃣ Blocks و Error Handling
+Block
+yaml
+
+- block:
+    - name: install
+      apt: name=nginx state=present
+    - name: configure
+      template: src=nginx.j2 dest=/etc/nginx/nginx.conf
+  rescue:
+    - name: rollback
+      apt: name=nginx state=absent
+    - fail: msg="Installation failed"
+  always:
+    - name: cleanup
+      file: path=/tmp/install.lock state=absent
+  become: true
+  when: ansible_os_family == "Debian"
+
+Error handling
+yaml
+
+- name: risky
+  command: /usr/local/bin/may-fail
+  register: result
+  ignore_errors: yes
+
+- name: risky with changed_when
+  command: /usr/local/bin/check
+  register: result
+  changed_when: result.rc == 0
+  failed_when: result.rc not in [0, 1]
+
+- name: retry
+  command: /usr/local/bin/flaky
+  register: r
+  until: r.rc == 0
+  retries: 5
+  delay: 5
+
+- name: continue on unreachable
+  ping:
+  ignore_unreachable: yes
+
+- name: any_errors_fatal
+  hosts: all
+  any_errors_fatal: true
+
+- meta: end_play          # متوقف کردن play
+- meta: end_host          # فقط این host
+- meta: clear_facts
+- meta: refresh_inventory
+- meta: reset_connection
+- meta: flush_handlers
+- meta: noop
+
+۱۲️⃣ Handlers
+تعریف
+yaml
+
+- hosts: all
+  handlers:
+    - name: restart nginx
+      systemd: name=nginx state=restarted
+    
+    - name: reload systemd
+      systemd: daemon_reload=yes
+      listen: "systemd reload"
+    
+    - name: reload sysctl
+      command: sysctl --system
+      listen: "sysctl reload"
+
+استفاده
+yaml
+
+- name: config
+  template: src=nginx.j2 dest=/etc/nginx/nginx.conf
+  notify:
+    - restart nginx
+    - reload sysctl
+
+- name: config with listen
+  template: ...
+  notify: "systemd reload"
+
+Flush
+yaml
+
+- meta: flush_handlers    # اجرای فوری
+
+Force
+bash
+
+ansible-playbook site.yml --force-handlers
+
+۱۳️⃣ Roles و Collections
+ساخت Role
+bash
+
+ansible-galaxy role init myrole
+
+ساختار
+text
+
+roles/myrole/
+├── defaults/main.yml       # کمترین اولویت
+├── vars/main.yml           # بالا (override سخت)
+├── tasks/main.yml
+├── handlers/main.yml
+├── templates/*.j2
+├── files/
+├── meta/main.yml
+├── library/
+├── tests/
+└── README.md
+
+meta/main.yml
+yaml
+
+galaxy_info:
+  author: me
+  description: my role
+  license: MIT
+  min_ansible_version: "2.14"
+  platforms:
+    - name: EL
+      versions: [8, 9]
+    - name: Ubuntu
+      versions: [jammy]
+  galaxy_tags: [web]
+dependencies:
+  - role: common
+    vars: { some_var: value }
+  - src: geerlingguy.nginx
+
+استفاده در playbook
+yaml
+
+- hosts: all
+  roles:
+    - common
+    - role: nginx
+      vars:
+        nginx_port: 80
+      tags: [nginx]
+
+include_role vs import_role
+yaml
+
+- include_role: { name: myrole }        # dynamic, runtime
+  when: condition
+
+- import_role: { name: myrole }         # static, parse-time
+
+Collections
+yaml
+
+# requirements.yml
+collections:
+  - name: community.general
+    version: "==9.0.0"
+  - name: amazon.aws
+    version: ">=6.0.0,<7.0.0"
+
+bash
+
+ansible-galaxy collection install -r requirements.yml -p ./collections
+
+FQCN (Fully Qualified Collection Name)
+yaml
+
+- ansible.builtin.copy: ...
+- community.general.ufw: ...
+- amazon.aws.ec2_instance: ...
+
+۱۴️⃣ Vault
+رمزنگاری
+bash
+
+ansible-vault create secrets.yml
+ansible-vault encrypt file.yml
+ansible-vault edit secrets.yml
+ansible-vault view secrets.yml
+ansible-vault decrypt secrets.yml
+ansible-vault rekey secrets.yml
+
+inline string
+bash
+
+ansible-vault encrypt_string 'mysecret' --name 'db_password'
+ansible-vault encrypt_string --stdin-name 'api_key'
+
+استفاده در playbook
+bash
+
+ansible-playbook site.yml --ask-vault-pass
+ansible-playbook site.yml --vault-password-file=~/.vault_pass
+ansible-playbook site.yml --vault-id prod@vault-prod.sh
+ansible-playbook site.yml --vault-id dev@prompt --vault-id prod@~/.vault_prod
+
+چند vault-id
+bash
+
+# فایل با id رمز شده
+ansible-vault encrypt --vault-id prod@prompt secrets.yml
+
+# اجرای multi
+ansible-playbook site.yml \
+  --vault-id dev@~/.vault_dev \
+  --vault-id prod@~/.vault_prod
+
+script-based (از HashiCorp Vault / AWS)
+bash
+
+#!/bin/bash
+# vault-client.sh
+aws secretsmanager get-secret-value \
+  --secret-id ansible/vault \
+  --query SecretString --output text | jq -r .password
+
+bash
+
+chmod +x vault-client.sh
+ansible-playbook --vault-password-file=./vault-client.sh site.yml
+
+Best Practices
+
+    chmod 600 روی فایل رمز
+
+    رمز در git نگذار
+
+    --vault-id با id معنادار (dev/prod/staging)
+
+    rotation هر ۹۰ روز
+
+    no_log: true روی taskهای حساس
+
+۱۵️⃣ Delegation و Strategy
+delegate_to
+yaml
+
+- name: task on another host
+  command: /usr/bin/migration
+  delegate_to: db-primary
+
+- name: run on localhost
+  command: /usr/bin/script
+  delegate_to: localhost
+  connection: local
+  run_once: true
+
+- name: gather fact from another host
+  setup:
+  delegate_to: "{{ other_host }}"
+  delegate_facts: true
+
+- name: cluster-wide change
+  command: /usr/bin/notify-cluster
+  run_once: true
+
+run_once
+yaml
+
+- name: database migration
+  command: /usr/bin/migrate
+  run_once: true
+  delegate_to: "{{ groups['db_primary'][0] }}"
+
+serial
+yaml
+
+- hosts: cluster
+  serial: 1                  # one at a time
+  serial: 5                  # 5 at a time
+  serial: "25%"              # 25% of hosts
+  serial: [1, 5, 10, "100%"] # canary → full
+  max_fail_percentage: 10
+
+strategy
+yaml
+
+- hosts: all
+  strategy: linear       # default, batch-level
+  strategy: free         # fast hosts proceed independently
+  strategy: host_pinned  # one host at a time
+
+throttle (Ansible 2.9+)
+yaml
+
+- name: rate-limited API
+  uri: ...
+  throttle: 5            # max 5 concurrent for this task
+
+async + poll
+yaml
+
+# fire and forget
+- name: long task
+  command: /usr/local/bin/backup.sh
+  async: 3600
+  poll: 0
+  register: job
+
+# wait later
+- name: wait
+  async_status: { jid: "{{ job.ansible_job_id }}" }
+  register: result
+  until: result.finished
+  retries: 60
+  delay: 60
+
+۱۶️⃣ Troubleshooting
+چک‌لیست تشخیص سریع
+اتصال
+bash
+
+ssh -vvv user@host
+ansible host -m ping -vvv
+nc -zv host 22
+
+Python
+bash
+
+ansible host -m setup -vvv
+ansible host -m raw -a "python3 --version"
+
+syntax
+bash
+
+ansible-playbook site.yml --syntax-check
+yamllint site.yml
+ansible-lint site.yml
+
+dry-run
+bash
+
+ansible-playbook site.yml --check --diff
+
+verbose levels
+text
+
+-v    : basic
+-vv   : task args
+-vvv  : connection info
+-vvvv : full debug (massive)
+
+debug
+bash
+
+ANSIBLE_DEBUG=1 ansible-playbook site.yml
+ANSIBLE_KEEP_REMOTE_FILES=1 ansible-playbook site.yml -vvv
+
+config
+bash
+
+ansible-config dump --only-changed
+ansible-config dump | grep -i <key>
+ansible-config view
+
+inventory
+bash
+
+ansible-inventory --list
+ansible-inventory --graph --vars
+ansible-inventory --host web01
+
+خطاهای رایج و رفع سریع
+خطا	رفع سریع
+UNREACHABLE	rm -rf ~/.ansible/cp/*
+Permission denied (publickey)	ansible_ssh_private_key_file=...
+Missing sudo password	-K یا !requiretty
+Host key verification failed	ssh-keyscan >> known_hosts
+python not found	interpreter_python=/usr/bin/python3
+Module not found	ansible-galaxy collection install <coll>
+apt lock	systemctl stop unattended-upgrades
+undefined variable	-e @vars.yml یا default()
+Vault decrypt failed	--vault-password-file
+world writable dir	اجرا از مسیر امن
+Control socket stale	rm -rf ~/.ansible/cp/*
+Timeout waiting for prompt	-K / !requiretty
+Handler not found	تعریف handler در play
+Callback failed	callbacks_enabled بدون callback معیوب
+MODULE FAILURE	-vvv + ANSIBLE_KEEP_REMOTE_FILES=1
+دستورهای تشخیص
+bash
+
+# ترتیب پیشنهادی
+ansible-config dump --only-changed
+ansible-inventory --graph
+ansible all -m ping -vvv
+ansible host -m setup -vvv
+ansible-playbook --syntax-check
+ansible-playbook --check --diff
+ansible-playbook -vvv --start-at-task="<task>"
+
+۱۷️⃣ Security Best Practices
+Config
+ini
+
+[defaults]
+host_key_checking = True
+allow_world_readable_tmpfiles = False
+error_on_undefined_vars = True
+allow_unsafe_lookups = False
+inject_facts_as_vars = False
+hash_behaviour = replace
+log_path = /var/log/ansible.log
+
+ini
+
+[ssh_connection]
+pipelining = True
+ssh_args = -o PreferredAuthentications=publickey -o PasswordAuthentication=no -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/ssh/ssh_known_hosts
+control_path_dir = ~/.ansible/cp
+ssh_transfer_method = piped
+
+User
+
+    کاربر غیر‌روت (deploy, ansible)
+
+    sudoers محدود به whitelist
+
+    کلید SSH با passphrase (یا ssh-agent)
+
+    rotation دوره‌ای کلیدها
+
+Secrets
+
+    Vault برای همه رمزها
+
+    Vault password از secret manager
+
+    no_log: true روی taskهای حساس
+
+    chmod 600 روی همه فایل‌های رمز
+
+Files
+bash
+
+chmod 750 /etc/ansible
+chmod 640 /etc/ansible/ansible.cfg
+chmod 600 /etc/ansible/.vault_pass
+chmod 700 /etc/ansible/keys/
+chmod 600 /etc/ansible/keys/*
+
+Log
+yaml
+
+log_path = /var/log/ansible.log
+# /var/log/ansible.log chmod 640 گروه adm
+# SIEM rule برای: password, secret, token, api_key
+
+SSH CA (scale)
+bash
+
+# روی CA
+ssh-keygen -t ed25519 -f /root/ca_key
+ssh-keygen -s /root/ca_key -I <host> -h -n <host> -V +52w host_key.pub
+
+# در ssh_known_hosts
+@cert-authority *.example.com ssh-ed25519 AAAA...
+
+Playbook
+yaml
+
+- name: secret task
+  uri:
+    url: "{{ api }}"
+    headers:
+      Authorization: "Bearer {{ token }}"
+  no_log: true
+
+- name: user creation
+  user:
+    name: "{{ item.name }}"
+    password: "{{ item.pw_hash }}"
+  loop: "{{ users }}"
+  loop_control:
+    label: "{{ item.name }}"
+  no_log: true
+
+Audit
+
+    auditd روی /etc/ansible, /opt/ansible-venv
+
+    git + code review برای همه تغییرات
+
+    ansible-lint در CI
+
+    SIEM روی logs
+
+    CVE monitoring (ansible-core, jinja2, cryptography)
+
+۱۸️⃣ الگوهای رایج (Patterns)
+۱۸.۱ Rolling Deploy با Health Check
+yaml
+
+- hosts: webservers
+  serial: [1, 5, "25%"]
+  max_fail_percentage: 10
+  tasks:
+    - name: drain from LB
+      uri:
+        url: "http://lb/api/drain/{{ inventory_hostname }}"
+      delegate_to: localhost
+    
+    - name: deploy
+      copy: src=app dest=/opt/app/
+      notify: restart app
+    
+    - name: wait ready
+      uri:
+        url: "http://{{ inventory_hostname }}/health"
+        status_code: 200
+      retries: 30
+      delay: 2
+    
+    - name: add to LB
+      uri:
+        url: "http://lb/api/enable/{{ inventory_hostname }}"
+      delegate_to: localhost
+  handlers:
+    - name: restart app
+      systemd: { name: myapp, state: restarted }
+
+۱۸.۲ Configure All Files از Template
+yaml
+
+- name: configs
+  template:
+    src: "{{ item }}.j2"
+    dest: "/etc/{{ item }}"
+    mode: '0644'
+    validate: "/usr/sbin/{{ item }} -t %s"
+    backup: yes
+  loop:
+    - nginx.conf
+    - sites/default.conf
+  notify: restart nginx
+
+۱۸.۳ Multi-OS Package Install
+yaml
+
+- name: install packages
+  package:
+    name: "{{ packages[ansible_os_family] }}"
+    state: present
+  vars:
+    packages:
+      Debian: [nginx, curl, git]
+      RedHat: [nginx, curl, git]
+
+۱۸.۴ User + SSH Key + Sudo
+yaml
+
+- user:
+    name: "{{ item.name }}"
+    groups: "{{ item.groups }}"
+    shell: /bin/bash
+    generate_ssh_key: yes
+    ssh_key_type: ed25519
+  loop: "{{ users }}"
+
+- authorized_key:
+    user: "{{ item.name }}"
+    key: "{{ lookup('file', 'keys/' + item.name + '.pub') }}"
+  loop: "{{ users }}"
+
+- copy:
+    content: "{{ item.name }} ALL=(ALL) NOPASSWD: {{ item.sudo_cmds | join(', ') }}\n"
+    dest: "/etc/sudoers.d/{{ item.name }}"
+    mode: '0440'
+    validate: 'visudo -cf %s'
+  loop: "{{ users }}"
+
+۱۸.۵ Cluster Bootstrap از Delegation
+yaml
+
+- hosts: k8s-master
+  tasks:
+    - name: init cluster
+      command: kubeadm init
+      run_once: true
+      register: init
+    
+    - name: fetch join command
+      command: kubeadm token create --print-join-command
+      register: join
+      run_once: true
+    
+    - set_fact:
+        join_cmd: "{{ hostvars[groups['k8s-master'][0]]['join'].stdout }}"
+
+- hosts: k8s-worker
+  tasks:
+    - name: join
+      command: "{{ hostvars[groups['k8s-master'][0]]['join_cmd'] }}"
+
+۱۸.۶ Idempotent Command
+yaml
+
+- name: install app
+  command: /usr/local/bin/install.sh
+  args:
+    creates: /opt/app/.installed
+
+- name: run migration
+  command: /app/migrate
+  register: result
+  changed_when: "'Already applied' not in result.stdout"
+
+۱۸.۷ Secret از Vault
+yaml
+
+- name: set db password
+  mysql_user:
+    name: "{{ db_user }}"
+    password: "{{ vault_db_password }}"
+    state: present
+  no_log: true
+  when: vault_db_password is defined
+
+۱۸.۸ Fact-based Config
+yaml
+
+- name: tune JVM
+  template:
+    src: jvm.options.j2
+    dest: /opt/app/jvm.options
+  vars:
+    jvm_heap: "{{ (ansible_memtotal_mb * 0.5) | int }}m"
+
+۱۸.۹ Rolling Restart Safe
+yaml
+
+- hosts: cluster
+  serial: 1
+  tasks:
+    - name: drain
+      uri: { url: "http://{{ inventory_hostname }}/admin/drain" }
+    
+    - name: wait connections drain
+      wait_for: { timeout: 60, port: 80, state: stopped }
+    
+    - name: restart
+      systemd: { name: app, state: restarted }
+    
+    - name: health
+      uri: { url: "http://{{ inventory_hostname }}/health" }
+      retries: 30
+      delay: 2
+
+۱۸.۱۰ Multi-Environment
+yaml
+
+# inventory/production/group_vars/all.yml
+env: production
+db_host: db-prod.internal
+replicas: 5
+
+# inventory/staging/group_vars/all.yml
+env: staging
+db_host: db-stg.internal
+replicas: 1
+
+# اجرا
+ansible-playbook -i inventory/production site.yml
+ansible-playbook -i inventory/staging site.yml
+
+۱۸.۱۱ Conditional Role Inclusion
+yaml
+
+- include_role: { name: nginx }
+  when: "'webservers' in group_names"
+
+- include_role: { name: postgres }
+  when: "'dbservers' in group_names"
+
+۱۸.۱۲ Multi-Cloud Deploy
+yaml
+
+- name: deploy
+  include_tasks: "{{ cloud_provider }}.yml"
+  vars:
+    cloud_provider: "{{ ansible_facts['local'].cloud }}"
+
+۱۹️⃣ Anti-patterns (پرهیز)
+❌ shell برای همه چیز
+yaml
+
+# ❌
+- shell: apt install nginx -y
+
+# ✅
+- apt: name=nginx state=present
+
+❌ command بدون idempotency
+yaml
+
+# ❌
+- command: /usr/local/bin/setup.sh
+
+# ✅
+- command: /usr/local/bin/setup.sh
+  args: { creates: /opt/app/.setup_done }
+
+❌ changed_when: false روی taskهای تغییریافته
+yaml
+
+# ❌
+- command: systemctl restart nginx
+  changed_when: false     # دروغ
+
+# ✅
+- systemd: name=nginx state=restarted
+  notify: healthcheck
+
+❌ gather_facts با all همیشه
+yaml
+
+# ❌ در 500 host
+- hosts: all
+  gather_facts: yes
+
+# ✅
+- hosts: all
+  gather_facts: yes
+  gather_subset: [min, network]
+
+❌ become: true سراسری
+yaml
+
+# ❌
+- hosts: all
+  become: true
+
+# ✅
+- hosts: all
+  tasks:
+    - name: task requiring root
+      apt: name=nginx state=present
+      become: true
+
+❌ متغیر global بدون نام معنادار
+yaml
+
+# ❌
+port: 80
+
+# ✅
+nginx_port: 80
+
+❌ host_key_checking: False
+ini
+
+# ❌ = MITM
+host_key_checking = False
+
+# ✅
+host_key_checking = True
+# + مدیریت known_hosts
+
+❌ رمز hardcode
+yaml
+
+# ❌
+password: "SuperSecret123"
+
+# ✅
+password: "{{ vault_db_password }}"
+no_log: true
+
+❌ with_* قدیمی
+yaml
+
+# ❌
+with_items: "{{ items }}"
+
+# ✅
+loop: "{{ items }}"
+
+❌ include (deprecated)
+yaml
+
+# ❌
+- include: tasks.yml
+
+# ✅
+- include_tasks: tasks.yml    # dynamic
+- import_tasks: tasks.yml     # static
+
+۲۰️⃣ Cheat Sheet یک‌خطی‌ها
+One-Liners
+bash
+
+# Ping
+ansible all -m ping
+
+# Uptime
+ansible all -m command -a uptime
+
+# Fact
+ansible host -m setup -a 'filter=ansible_*ipv4*'
+
+# Install
+ansible all -b -m apt -a 'name=htop state=present'
+
+# Copy
+ansible all -m copy -a 'src=/tmp/x dest=/etc/x mode=0644'
+
+# Command
+ansible all -m command -a 'systemctl restart nginx' -b
+
+# Check disk
+ansible all -m shell -a 'df -h' -o
+
+# Top memory
+ansible all -m shell -a 'ps aux --sort=-%mem | head -5' -o
+
+# Kernel
+ansible all -m command -a 'uname -r' -o
+
+# Users
+ansible all -m shell -a "awk -F: '\$3>=1000' /etc/passwd" -o
+
+# Uptime check
+ansible all -m command -a uptime -o
+
+# Python check
+ansible all -m raw -a 'python3 --version'
+
+# Service status
+ansible all -m shell -a 'systemctl is-active nginx' -o
+
+# Reboot if needed
+ansible all -m command -a 'test -f /var/run/reboot-required'
+
+Playbook One-Liners
+bash
+
+# Syntax check
+ansible-playbook x.yml --syntax-check
+
+# Dry-run
+ansible-playbook x.yml --check --diff
+
+# Only tags
+ansible-playbook x.yml --tags deploy
+
+# Skip tags
+ansible-playbook x.yml --skip-tags test
+
+# Limited hosts
+ansible-playbook x.yml --limit web01
+
+# Retry
+ansible-playbook x.yml --limit @x.retry
+
+# Extra vars
+ansible-playbook x.yml -e "version=1.2.3"
+
+# Vars file
+ansible-playbook x.yml -e @vars/prod.yml
+
+# Vault
+ansible-playbook x.yml --ask-vault-pass
+
+# Start at
+ansible-playbook x.yml --start-at-task="Deploy"
+
+# List
+ansible-playbook x.yml --list-tasks --list-tags --list-hosts
+
+Vault One-Liners
+bash
+
+# Create
+ansible-vault create secrets.yml
+
+# Encrypt string
+ansible-vault encrypt_string 'pass' --name 'pw'
+
+# View
+ansible-vault view secrets.yml
+
+# Edit
+ansible-vault edit secrets.yml
+
+# Rekey
+ansible-vault rekey secrets.yml
+
+# Decrypt
+ansible-vault decrypt secrets.yml
+
+Galaxy One-Liners
+bash
+
+# Init role
+ansible-galaxy role init myrole
+
+# Install
+ansible-galaxy role install geerlingguy.nginx
+ansible-galaxy collection install community.general
+
+# Requirements
+ansible-galaxy collection install -r requirements.yml
+ansible-galaxy role install -r roles/requirements.yml -p roles/
+
+# List
+ansible-galaxy role list
+ansible-galaxy collection list
+
+# Verify
+ansible-galaxy collection verify community.general
+
+🎓 جمع‌بندی: ۱۵ قاعده طلایی
+
+    همیشه --syntax-check قبل از اجرا
+
+    --check --diff در staging قبل از prod
+
+    serial برای هر چیزی که downtime دارد
+
+    max_fail_percentage برای abort خودکار
+
+    no_log: true روی هر task با secret
+
+    Vault برای همه رمزها + secret manager برای رمز vault
+
+    host_key_checking = True هرگز تغییر نده
+
+    pipelining = True + !requiretty برای سرعت و امنیت
+
+    Idempotency test: دو بار اجرا، بار دوم changed=0
+
+    FQCN همیشه (ansible.builtin.copy نه copy)
+
+    Collections را pin کن (requirements.yml با version)
+
+    ansible-lint + yamllint در CI
+
+    Monitoring + log_path + SIEM
+
+    Backup + rollback plan قبل از هر deploy
+
+    Runbook برای هر playbook production
+
+🔖 مرجع سریع: نام‌ها و نسخه‌ها
+نسخه‌های پایدار (2024)
+text
+
+ansible-core 2.17.x    (Python 3.10+)
+ansible-core 2.16.x    (Python 3.10+)
+ansible 10.x           (bundle، شامل ansible-core 2.17)
+ansible 9.x            (bundle، شامل ansible-core 2.16)
+
+Collections پرکاربرد
+text
+
+ansible.builtin       (core)
+ansible.posix
+ansible.utils
+ansible.netcommon
+community.general
+community.docker
+community.crypto
+community.mysql
+community.postgresql
+amazon.aws
+azure.azcollection
+google.cloud
+kubernetes.core
+cisco.ios
+arista.eos
+junipernetworks.junos
+
+لینک‌های رسمی
+text
+
+docs.ansible.com                    مستندات
+galaxy.ansible.com                  galaxy
+github.com/ansible/ansible          سورس
+github.com/ansible/ansible-lint     linter
+
+🎯 حالا با این چیت‌شیت می‌توانی:
+
+    هر task را بی‌درنگ بنویسی
+
+    خطاها را سریع دیباگ کنی
+
+    در محیط production امن اجرا کنی
+
+    برای مصاحبه و بررسی آماده باشی
+
+    به تیم جدید آموزش بدهی

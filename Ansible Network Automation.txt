@@ -1,0 +1,2143 @@
+﻿🌐 Ansible برای Network Automation — راهنمای عمیق و تخصصی
+
+    این مرجع کامل درباره اتوماسیون تجهیزات شبکه با Ansible است: از معماری اتصال تا production workflows برای Cisco، Juniper، Arista، Fortinet، Palo Alto، F5 و MikroTik.
+
+📑 فهرست
+text
+
+۱.  تفاوت Ansible برای Network vs Server
+۲.  معماری Connection
+۳.  Connection Plugins (network_cli, netconf, httpapi, local)
+۴.  Inventory برای Network Devices
+۵.  ansible_network_os و Collectionها
+۶.  Fact Gathering از تجهیزات
+۷.  Command Modules (اجرای show)
+۸.  Config Modules (تغییر config)
+۹.  Resource Modules (مدل‌محور)
+۱۰. Backup و Restore
+۱۱. Diff و Check Mode
+۱۲. Templates برای Config
+۱۳. Parsing Output
+۱۴. Multi-Vendor Abstraction
+۱۵. Compliance و Audit
+۱۶. Rolling Changes و Safety
+۱۷. NAPALM (لایه انتزاعی)
+۱۸. Workflows عملی (BGP, OSPF, VLAN, ACL)
+۱۹. Troubleshooting
+۲۰. Security Best Practices
+۲۱. Performance و Scale
+۲۲. Recipes آماده
+
+۱️⃣ تفاوت Ansible برای Network vs Server
+چالش‌های خاص Network Devices
+ویژگی	Server (Linux)	Network Device
+Python روی دستگاه	✅ دارد	❌ ندارد
+اجرای ماژول روی دستگاه	✅ ممکن	❌ غیرممکن
+اتصال	SSH + اجرای Python	SSH/Telnet/API محدود
+Fact gathering	/proc, /sys	فقط CLI command یا NETCONF
+Idempotency	ماژول تضمین می‌کند	باید خودمان control کنیم
+Rollback	snapshot/filesystem	configure replace یا commit confirmed
+Test	Molecule/Docker	سخت‌تر (GNS3, EVE-NG, containerlab)
+Connection	ssh, local	network_cli, netconf, httpapi
+Connection persistence	جلسه SSH	persistent connection لازم
+چه اتفاقی می‌افتد؟
+text
+
+┌──────────────────────────┐
+│  Control Node            │
+│                          │
+│  1. Ansible reads config │
+│  2. Renders commands     │
+│  3. Connects via SSH     │
+│  4. Pushes CLI commands  │
+│  5. Parses response      │
+│  6. Evaluates changed?   │
+└────────────┬─────────────┘
+             │
+             │ SSH / NETCONF / HTTPS
+             ▼
+┌──────────────────────────┐
+│  Network Device          │
+│  (switch, router, fw)    │
+│  - IOS / Junos / EOS     │
+│  - No Python             │
+│  - CLI / API             │
+└──────────────────────────┘
+
+نکته کلیدی: ماژول‌ها روی کنترل نود اجرا می‌شوند و فقط command/XML/JSON به دستگاه می‌فرستند.
+۲️⃣ معماری Connection
+چرا connection: ssh مستقیم کار نمی‌کند؟
+
+وقتی ansible_connection: ssh باشد، Ansible سعی می‌کند یک اسکریپت Python روی مقصد اجرا کند. Network device:
+
+    Python ندارد
+
+    shell ندارد
+
+    فقط CLI یا XML یا REST می‌فهمد
+
+Persistent Connection
+
+برای network_cli و netconf، Ansible یک پروسه پشتیبان روی کنترل نود اجرا می‌کند که جلسه SSH را زنده نگه می‌دارد:
+text
+
+┌────────────────┐
+│ ansible-playbook│
+└────────┬───────┘
+         │
+         ▼
+┌──────────────────────────────────┐
+│  ansible-connection (daemon)     │
+│  - Persistent session             │
+│  - Local unix socket              │
+│  - Reuses SSH channel             │
+└────────┬─────────────────────────┘
+         │ persistent SSH
+         ▼
+┌────────────────┐
+│ Network Device │
+└────────────────┘
+
+مسیر socket
+text
+
+~/.ansible/pc/<uuid>
+
+پاک‌سازی stuck socket
+bash
+
+ls ~/.ansible/pc/
+pkill -f ansible-connection
+rm -rf ~/.ansible/pc/*
+
+تنظیم
+ini
+
+# ansible.cfg
+[persistent_connection]
+connection_timeout = 60
+command_timeout = 60
+connect_timeout = 60
+control_path_dir = ~/.ansible/pc
+
+۳️⃣ Connection Plugins
+۳.۱ network_cli — SSH به CLI
+
+کاربرد: اکثر تجهیزات (Cisco IOS/NX-OS, Arista EOS, Juniper Junos, Aruba, VyOS).
+yaml
+
+# inventory/hosts.yml
+all:
+  children:
+    cisco_switches:
+      hosts:
+        sw01:
+          ansible_host: 10.0.0.1
+      vars:
+        ansible_connection: network_cli
+        ansible_network_os: cisco.ios.ios   # FQCN
+        ansible_user: ansible
+        ansible_password: "{{ vault_sw_password }}"
+        ansible_become: yes
+        ansible_become_method: enable       # برای IOS
+
+تنظیمات مهم
+پارامتر	توضیح
+ansible_network_os	FQCN یا نام کوتاه (ios, junos, eos, nxos)
+ansible_become_method	enable (Cisco) یا sudo
+ansible_network_cli_ssh_type	libssh (سریع) یا paramiko (پیش‌فرض)
+ansible_command_timeout	timeout per command (60s)
+ansible_connect_timeout	timeout اتصال (30s)
+libssh برای سرعت
+bash
+
+pip install ansible-pylibssh
+
+yaml
+
+ansible_network_cli_ssh_type: libssh
+
+سرعت ۳-۵ برابر بیشتر از paramiko.
+۳.۲ netconf — XML API
+
+کاربرد: Juniper Junos، Cisco IOS-XR/NX-OS (با netconf)، Nokia SR-OS.
+yaml
+
+sw02:
+  ansible_host: 10.0.0.2
+  ansible_connection: netconf
+  ansible_network_os: junipernetworks.junos.junos
+  ansible_user: ansible
+  ansible_password: "{{ vault_pw }}"
+  ansible_netconf_port: 830
+
+مزایا:
+
+    Transactional (commit/rollback)
+
+    ساختاریافته (XML)
+
+    Confirm-commit (rollback خودکار)
+
+    سریع‌تر از CLI
+
+معایب:
+
+    باید در دستگاه فعال باشد
+
+    پیچیده‌تر
+
+فعال‌سازی روی Junos
+text
+
+set system services netconf ssh
+set system services netconf traceoptions file netconf-trace
+
+مثال
+yaml
+
+- name: configure interface via netconf
+  junipernetworks.junos.junos_config:
+    lines:
+      - "set interfaces ge-0/0/1 unit 0 family inet address 10.0.0.1/24"
+    comment: "Ansible managed"
+    confirm_commit: 5        # rollback اگر تا 5 دقیقه commit نشود
+
+۳.۳ httpapi — REST API
+
+کاربرد: Cisco NX-OS، Arista EOS، F5 BIG-IP، Fortinet، Palo Alto.
+yaml
+
+eos01:
+  ansible_host: 10.0.0.10
+  ansible_connection: httpapi
+  ansible_network_os: arista.eos.eos
+  ansible_user: admin
+  ansible_password: "{{ vault_pw }}"
+  ansible_httpapi_use_ssl: yes
+  ansible_httpapi_validate_certs: yes
+  ansible_httpapi_port: 443
+
+yaml
+
+nxos01:
+  ansible_connection: httpapi
+  ansible_network_os: cisco.nxos.nxos
+  ansible_httpapi_use_ssl: yes
+  ansible_httpapi_port: 443
+
+مزایا: سریع، ساختاریافته، بی‌نیاز از SSH.
+۳.۴ local — deprecated
+
+قبلاً برای تجهیزاتی مثل Cumulus Linux که Python دارد استفاده می‌شد:
+yaml
+
+# ❌ deprecated (Ansible 2.10+)
+ansible_connection: local
+
+جایگزین: network_cli یا paramiko.
+۳.۵ ssh (برای Cumulus/SONiC)
+yaml
+
+cumulus01:
+  ansible_connection: ssh
+  ansible_user: cumulus
+  # Python روی دستگاه دارد
+
+۳.۶ httpapi برای Fortinet / Palo Alto / F5
+yaml
+
+fw01:
+  ansible_connection: httpapi
+  ansible_network_os: fortinet.fortios.fortios
+  ansible_user: admin
+  ansible_password: "{{ vault_pw }}"
+  ansible_httpapi_use_ssl: yes
+  ansible_httpapi_port: 443
+
+۴️⃣ Inventory برای Network Devices
+ساختار پیشنهادی
+yaml
+
+# inventory/network/hosts.yml
+all:
+  children:
+    datacenter:
+      children:
+        dc1:
+          children:
+            dc1_core:
+              hosts:
+                dc1-core01:
+                  ansible_host: 10.1.1.1
+                dc1-core02:
+                  ansible_host: 10.1.1.2
+              vars:
+                ansible_network_os: cisco.ios.ios
+                ansible_connection: network_cli
+                ansible_become: yes
+                ansible_become_method: enable
+            dc1_access:
+              hosts:
+                dc1-acc01:
+                  ansible_host: 10.1.2.1
+                dc1-acc02:
+                  ansible_host: 10.1.2.2
+              vars:
+                ansible_network_os: arista.eos.eos
+                ansible_connection: httpapi
+                ansible_httpapi_use_ssl: yes
+          vars:
+            site: dc1
+            ntp_servers: [10.0.0.1, 10.0.0.2]
+            syslog_servers: [10.0.0.3]
+        dc2:
+          # ...
+    campus:
+      children:
+        campus_core:
+          hosts:
+            campus-core01:
+              ansible_host: 10.2.1.1
+              ansible_network_os: junipernetworks.junos.junos
+              ansible_connection: netconf
+
+  vars:
+    ansible_user: ansible
+    ansible_password: "{{ vault_network_password }}"
+    ansible_command_timeout: 60
+    ansible_connect_timeout: 30
+
+گروه‌بندی بر اساس نقش
+text
+
+by_vendor:     cisco, juniper, arista
+by_role:       core, distribution, access, firewall
+by_site:       dc1, dc2, campus
+by_os:         ios, nxos, eos, junos
+by_env:        prod, staging
+by_change:     canary, safe
+
+گروه‌های پویا
+yaml
+
+# از CMDB یا Nautobot
+plugin: networktocode.nautobot.inventory
+api_endpoint: https://nautobot.internal
+token: "{{ vault_nautobot_token }}"
+group_by:
+  - device_role
+  - site
+  - platform
+compose:
+  ansible_network_os: platform.slug
+
+ansible_network_os FQCN
+Vendor	Collection	FQCN
+Cisco IOS	cisco.ios	cisco.ios.ios
+Cisco NX-OS	cisco.nxos	cisco.nxos.nxos
+Cisco IOS-XR	cisco.iosxr	cisco.iosxr.iosxr
+Cisco ASA	cisco.asa	cisco.asa.asa
+Arista EOS	arista.eos	arista.eos.eos
+Juniper Junos	junipernetworks.junos	junipernetworks.junos.junos
+Palo Alto	paloaltonetworks.panos	— (REST/SDK)
+Fortinet	fortinet.fortios	fortinet.fortios.fortios
+F5 BIG-IP	f5networks.f5_modules	— (REST)
+VyOS	vyos.vyos	vyos.vyos.vyos
+Aruba	arubanetworks.aoscx	arubanetworks.aoscx.aoscx
+Nokia SR-OS	nokia.sros	—
+Dell OS10	dellemc.os10	dellemc.os10.os10
+MikroTik	community.routeros	community.routeros.routeros
+Cumulus	cumulusnetworks.nclu	cumulusnetworks.nclu.nclu
+۵️⃣ نصب Collections
+yaml
+
+# collections/requirements.yml
+collections:
+  - name: cisco.ios
+    version: ">=6.0.0"
+  - name: cisco.nxos
+    version: ">=6.0.0"
+  - name: cisco.iosxr
+    version: ">=7.0.0"
+  - name: arista.eos
+    version: ">=6.0.0"
+  - name: junipernetworks.junos
+    version: ">=7.0.0"
+  - name: ansible.netcommon
+    version: ">=5.0.0"     # پایه network
+  - name: ansible.utils
+    version: ">=3.0.0"     # parse
+  - name: fortinet.fortios
+  - name: vyos.vyos
+  - name: paloaltonetworks.panos
+  - name: f5networks.f5_modules
+
+bash
+
+ansible-galaxy collection install -r requirements.yml -p ./collections
+
+ansible.netcommon پایه‌ی network_cli, netconf, httpapi است. بدون آن هیچ‌کدام کار نمی‌کند.
+
+ansible.utils شامل clay, parse_cli, validate و validatorهای config است.
+۶️⃣ Fact Gathering
+ios_facts (و مشابه‌ها)
+yaml
+
+- name: gather facts
+  cisco.ios.ios_facts:
+    gather_subset:
+      - all
+      # یا selective:
+      # - hardware
+      # - config
+      # - interfaces
+      # - routing
+    gather_network_resources:
+      - interfaces
+      - l3_interfaces
+      - lacp
+
+Factهای معمول
+yaml
+
+ansible_net_hostname
+ansible_net_model
+ansible_net_serialnum
+ansible_net_version        # نسخه IOS
+ansible_net_image
+ansible_net_memfree_mb
+ansible_net_memtotal_mb
+ansible_net_filesystems
+ansible_net_all_ipv4_addresses
+ansible_net_all_ipv6_addresses
+ansible_net_interfaces    # dict
+ansible_net_neighbors     # LLDP/CDP
+ansible_net_config        # running-config (gather_subset: config)
+
+مثال
+yaml
+
+- name: gather all
+  cisco.ios.ios_facts:
+    gather_subset: [all]
+
+- name: assert compliance
+  assert:
+    that:
+      - ansible_net_version is version('17.9.4', '>=')
+      - ansible_net_model == 'C9300-48P'
+    fail_msg: "{{ inventory_hostname }} not compliant"
+
+- name: report
+  debug:
+    msg: |
+      {{ inventory_hostname }}:
+        Model:   {{ ansible_net_model }}
+        IOS:     {{ ansible_net_version }}
+        Serial:  {{ ansible_net_serialnum }}
+
+Fact از routing
+yaml
+
+- name: gather BGP
+  cisco.ios.ios_command:
+    commands:
+      - show ip bgp summary
+      - show ip bgp neighbors
+  register: bgp
+
+- debug:
+    msg: "{{ bgp.stdout_lines[0] }}"
+
+Fact از LLDP (توپولوژی)
+yaml
+
+- name: gather LLDP
+  cisco.ios.ios_facts:
+    gather_subset: [interfaces]
+    gather_network_resources: [lldp_neighbors]
+
+- debug:
+    var: ansible_net_neighbors
+
+کاربرد: تشخیص خودکار توپولوژی → map کردن inventory.
+۷️⃣ Command Modules (اجرای show)
+ios_command / eos_command / junos_command
+yaml
+
+- name: show commands
+  cisco.ios.ios_command:
+    commands:
+      - show version
+      - show ip interface brief
+      - show ip bgp summary
+  register: output
+
+- debug:
+    var: output.stdout_lines
+
+# اجرای یک command با wait_for (تا وقتی output pattern را دارد)
+- name: wait for BGP
+  cisco.ios.ios_command:
+    commands:
+      - command: show bgp ipv4 unicast summary
+        wait_for: "state = Established"
+        match: contains
+        retries: 30
+        interval: 10
+
+# با prompt (برای command تعاملی)
+- name: write memory
+  cisco.ios.ios_command:
+    commands:
+      - command: copy running-config startup-config
+        prompt: 'Destination filename \[startup-config\]\?'
+        answer: "\r"
+
+parse (با ansible.utils)
+yaml
+
+- name: parse show output
+  cisco.ios.ios_command:
+    commands: [show ip interface brief]
+  register: intf
+
+- name: extract
+  ansible.utils.cli_parse:
+    text: "{{ intf.stdout[0] }}"
+    parser:
+      name: ansible.netcommon.native
+    set_fact: interfaces
+  # یا
+  ansible.utils.cli_parse:
+    text: "{{ intf.stdout[0] }}"
+    parser:
+      name: ansible.utils.ttp
+      template_path: templates/interfaces.ttp
+    set_fact: interfaces
+
+- debug:
+    msg: "{{ interfaces }}"
+
+Genie Parser (Cisco)
+yaml
+
+- name: parse with genie
+  ansible.utils.cli_parse:
+    text: "{{ intf.stdout[0] }}"
+    parser:
+      name: cisco.ios.genie
+    set_fact: parsed
+
+# پارامترهای parsed:
+# parsed.interfaces.<name>.ip_address
+# parsed.interfaces.<name>.status
+
+۸️⃣ Config Modules
+ios_config (و معادل‌های دیگر)
+yaml
+
+ios_config:
+  lines:                      # لیست command
+  parents:                    # context (e.g., interface Gi0/1)
+  match:                      # line | exact | none (پیش‌فرض: line)
+  replace:                    # line | block (پیش‌فرض: line)
+  before:                     # command قبل از تغییر
+  after:                      # command بعد از تغییر
+  backup:                     # yes → save running-config
+  backup_options:
+    filename:                 # مسیر backup
+    dir_path:                 # پوشه backup
+  save_when:                  # always | never | modified | changed
+  diff_against:               # startup | intended | session
+  diff_ignore_lines:          # regex برای ignore در diff
+  src:                        # فایل config کامل (جایگزین lines)
+
+مثال ۱: تغییر ساده
+yaml
+
+- name: configure NTP
+  cisco.ios.ios_config:
+    lines:
+      - ntp server 10.0.0.1
+      - ntp server 10.0.0.2
+    save_when: modified
+
+مثال ۲: تغییر داخل interface
+yaml
+
+- name: configure interface
+  cisco.ios.ios_config:
+    lines:
+      - description Uplink to Core
+      - switchport mode trunk
+      - switchport trunk allowed vlan 10,20,30
+      - no shutdown
+    parents:
+      - interface GigabitEthernet1/0/1
+    save_when: changed
+
+مثال ۳: Context تودرتو
+yaml
+
+- name: configure BGP neighbor
+  cisco.ios.ios_config:
+    lines:
+      - remote-as 65002
+      - description Peer with ISP-A
+      - address-family ipv4 unicast
+      - activate
+      - soft-reconfiguration inbound
+    parents:
+      - router bgp 65001
+      - neighbor 192.168.1.1
+    save_when: changed
+
+مثال ۴: Idempotency با match
+yaml
+
+# match: line  → هر خطی که در config باشد skip می‌شود
+# match: exact → خط دقیقاً باید match شود
+# match: none  → همیشه اضافه می‌کند (غیر idempotent)
+
+- name: strict match
+  cisco.ios.ios_config:
+    lines:
+      - ntp server 10.0.0.1
+    match: exact
+
+مثال ۵: Backup قبل از تغییر
+yaml
+
+- name: backup and configure
+  cisco.ios.ios_config:
+    lines:
+      - aaa new-model
+      - aaa authentication login default group tacacs+ local
+    backup: yes
+    backup_options:
+      dir_path: /backups/network/{{ inventory_hostname }}
+      filename: "config-{{ ansible_date_time.iso8601 }}.cfg"
+    save_when: changed
+
+مثال ۶: Diff
+yaml
+
+- name: diff against startup
+  cisco.ios.ios_config:
+    lines:
+      - hostname new-name
+    diff_against: startup
+    diff_ignore_lines:
+      - "^! Last configuration change"
+      - "^ntp clock-period"
+  register: diff
+
+- debug:
+    var: diff.diff
+
+junos_config
+yaml
+
+- name: junos config
+  junipernetworks.junos.junos_config:
+    lines:
+      - "set system ntp server 10.0.0.1"
+      - "set system host-name {{ inventory_hostname }}"
+    comment: "Managed by Ansible"
+    confirm_commit: 5       # rollback اگر commit تا 5 دقیقه نشود
+    update: merge           # merge | override | replace
+
+# یا از فایل کامل
+- junipernetworks.junos.junos_config:
+    src: configs/junos-base.conf
+    update: merge
+    confirm_commit: 10
+    backup: yes
+
+eos_config / nxos_config
+yaml
+
+- arista.eos.eos_config:
+    lines:
+      - "ntp server 10.0.0.1"
+    parents:
+      - "interface Ethernet1"
+    save_when: modified
+
+- cisco.nxos.nxos_config:
+    lines:
+      - "feature bgp"
+      - "router bgp 65001"
+    save_when: changed
+
+src برای config کامل
+yaml
+
+- name: full config replace
+  cisco.ios.ios_config:
+    src: templates/ios-base.cfg
+    replace: block      # یا line
+    backup: yes
+
+⚠️ replace: block با src کل config device را جایگزین می‌کند (خطرناک).
+۹️⃣ Resource Modules
+
+Resource modules یک لایه مدل‌محور روی config هستند. Idempotent، structured، تست‌شده.
+مزایا نسبت به ios_config
+	ios_config	Resource modules
+Idempotency	manual	automatic
+Structure	string	dict
+Diff	متن	structured
+Multi-vendor	هر vendor جدا	common interface
+Test	سخت	راحت
+ios_interfaces
+yaml
+
+- name: configure interfaces
+  cisco.ios.ios_interfaces:
+    config:
+      - name: GigabitEthernet1/0/1
+        description: "Uplink to Core"
+        enabled: true
+        mtu: 9000
+        speed: 1000
+        duplex: full
+      - name: GigabitEthernet1/0/2
+        description: "Downlink"
+        enabled: true
+    state: merged          # merged | replaced | overridden | deleted
+
+ios_l3_interfaces
+yaml
+
+- name: L3
+  cisco.ios.ios_l3_interfaces:
+    config:
+      - name: Vlan10
+        ipv4:
+          - address: 10.10.10.1/24
+          - address: 10.10.10.2/24 secondary
+      - name: Loopback0
+        ipv4:
+          - address: 10.0.0.1/32
+      - name: Vlan20
+        ipv6:
+          - address: 2001:db8::1/64
+
+ios_l2_interfaces
+yaml
+
+- name: L2
+  cisco.ios.ios_l2_interfaces:
+    config:
+      - name: GigabitEthernet1/0/1
+        mode: trunk
+        trunk:
+          allowed_vlans: [10, 20, 30]
+          native_vlan: 99
+      - name: GigabitEthernet1/0/2
+        mode: access
+        access:
+          vlan: 10
+
+ios_vlans
+yaml
+
+- name: create VLANs
+  cisco.ios.ios_vlans:
+    config:
+      - vlan_id: 10
+        name: users
+      - vlan_id: 20
+        name: servers
+      - vlan_id: 30
+        name: management
+    state: merged
+
+ios_bgp_global / ios_bgp_address_family
+yaml
+
+- name: BGP global
+  cisco.ios.ios_bgp_global:
+    config:
+      as_number: "65001"
+      router_id: "10.0.0.1"
+      log_neighbor_changes: true
+      neighbors:
+        - neighbor_address: "192.168.1.1"
+          remote_as: "65002"
+          description: "ISP-A"
+      networks:
+        - address: "10.10.0.0"
+          mask: "255.255.0.0"
+
+- name: BGP AF
+  cisco.ios.ios_bgp_address_family:
+    config:
+      as_number: "65001"
+      address_family:
+        - afi: "ipv4"
+          safi: "unicast"
+          neighbors:
+            - neighbor_address: "192.168.1.1"
+              activate: true
+              route_map:
+                - name: "RM-IN"
+                  in: true
+
+ios_ospfv2 / ios_ospfv3
+yaml
+
+- name: OSPF
+  cisco.ios.ios_ospfv2:
+    config:
+      processes:
+        - process_id: 1
+          router_id: 10.0.0.1
+          networks:
+            - address: 10.0.0.0
+              wildcard_bits: 0.0.0.255
+              area: 0
+
+ios_acl / ios_acls
+yaml
+
+- name: ACL
+  cisco.ios.ios_acls:
+    config:
+      - afi: ipv4
+        acls:
+          - name: "MGMT-IN"
+            acl_type: extended
+            aces:
+              - grant: permit
+                protocol: tcp
+                source:
+                  address: "10.0.0.0"
+                  wildcard_bits: "0.0.0.255"
+                destination:
+                  any: true
+                destination_ports:
+                  - eq: "22"
+              - grant: deny
+                protocol: ip
+                source:
+                  any: true
+                destination:
+                  any: true
+
+ios_snmp_server
+yaml
+
+- name: SNMP
+  cisco.ios.ios_snmp_server:
+    config:
+      location: "DC1 Row A"
+      contact: "noc@example.com"
+      communities:
+        - name: "monitoring"
+          acl_v4: "SNMP-ACL"
+          ro: true
+      hosts:
+        - host: "10.0.0.5"
+          community: "monitoring"
+          version: "2c"
+
+state در Resource Modules
+yaml
+
+state: merged       # اضافه به موجود (پیش‌فرض)
+state: replaced     # جایگزین کامل زیرمجموعه
+state: overridden   # جایگزین کامل + حذف بقیه
+state: deleted      # حذف
+state: gathered     # فقط خواندن (fact)
+state: rendered     # فقط render (بدون push)
+state: parsed       # parse (بدون push)
+
+gathered برای fact
+yaml
+
+- name: gather interfaces
+  cisco.ios.ios_interfaces:
+    state: gathered
+  register: interfaces
+
+- debug:
+    var: interfaces.gathered
+
+rendered برای preview (CI/CD)
+yaml
+
+- name: render config (بدون push)
+  cisco.ios.ios_config:
+    lines:
+      - hostname new-name
+    parents: [interface Gi0/1]
+    state: rendered
+  # خروجی: commands که اجرا می‌شد
+
+parsed برای compliance
+yaml
+
+- name: parse running-config
+  cisco.ios.ios_interfaces:
+    running_config: "{{ lookup('file', 'running.cfg') }}"
+    state: parsed
+  register: parsed
+
+- name: compare
+  assert:
+    that:
+      - parsed.parsed[0].mtu == 9000
+
+۱۰️⃣ Backup و Restore
+Backup
+yaml
+
+- name: backup running-config
+  cisco.ios.ios_config:
+    backup: yes
+    backup_options:
+      dir_path: "/backups/network/{{ inventory_hostname }}"
+      filename: "running-{{ ansible_date_time.iso8601 }}.cfg"
+    save_when: never       # فقط backup، بدون تغییر config
+
+Backup کامل (با facts)
+yaml
+
+- name: backup everything
+  cisco.ios.ios_command:
+    commands:
+      - show running-config
+      - show startup-config
+      - show version
+  register: backup
+
+- name: save locally
+  copy:
+    content: |
+      === RUNNING ===
+      {{ backup.stdout[0] }}
+
+      === STARTUP ===
+      {{ backup.stdout[1] }}
+
+      === VERSION ===
+      {{ backup.stdout[2] }}
+    dest: "/backups/network/{{ inventory_hostname }}/{{ ansible_date_time.iso8601 }}.txt"
+  delegate_to: localhost
+
+Restore
+yaml
+
+- name: restore from backup
+  cisco.ios.ios_config:
+    src: "/backups/network/{{ inventory_hostname }}/running-2024.cfg"
+    replace: block
+    backup: yes       # backup قبل از restore
+
+⚠️ restore کامل = خطر. همیشه:
+
+    Backup فعلی بگیر
+
+    --check بزن
+
+    serial: 1 روی یک switch اول
+
+    Rollback plan داشته باش
+
+Restore امن با configure replace (Cisco)
+yaml
+
+- name: config replace with rollback timer
+  cisco.ios.ios_command:
+    commands:
+      - command: "configure replace flash:backup.cfg time 5"
+        prompt: "\[confirm\]"
+        answer: "y"
+
+اگر تا ۵ دقیقه configure confirm نزنی → خودکار rollback.
+۱۱️⃣ Diff و Check Mode
+--check روی network device
+bash
+
+ansible-playbook site.yml --check --diff
+
+نکته حیاتی: --check روی بعضی ماژول‌های network کار نمی‌کند (netconf, eos با resource modules). در این حالت:
+yaml
+
+- name: simulate
+  cisco.ios.ios_config:
+    lines:
+      - hostname new
+    parents: [interface Gi0/1]
+  check_mode: yes
+
+یا از state: rendered استفاده کن.
+diff_against
+yaml
+
+- name: diff against startup
+  cisco.ios.ios_config:
+    lines:
+      - hostname new-name
+    diff_against: startup     # یا intended، session
+  register: diff
+
+- debug:
+    var: diff.diff
+
+کاربرد: مشاهده تفاوت running-config vs startup-config قبل از save.
+diff_ignore_lines
+yaml
+
+- name: diff با ignore
+  cisco.ios.ios_config:
+    lines: [...]
+    diff_ignore_lines:
+      - "^Building configuration"
+      - "^Current configuration"
+      - "^! Last configuration change"
+      - "^ntp clock-period"
+
+--diff روی playbook
+bash
+
+ansible-playbook site.yml --diff
+# → تفاوت config قبل/بعد
+
+۱۲️⃣ Templates برای Config
+Jinja2 با ios_config
+jinja2
+
+{# templates/base.cfg.j2 #}
+hostname {{ inventory_hostname }}
+!
+{% for ntp in ntp_servers %}
+ntp server {{ ntp }}
+{% endfor %}
+!
+{% for user in users %}
+username {{ user.name }} privilege {{ user.priv }} secret {{ user.password }}
+{% endfor %}
+!
+{% for vlan in vlans %}
+vlan {{ vlan.id }}
+ name {{ vlan.name }}
+{% endfor %}
+!
+{% for intf in interfaces %}
+interface {{ intf.name }}
+ description {{ intf.description }}
+{% if intf.mode == 'trunk' %}
+ switchport mode trunk
+ switchport trunk allowed vlan {{ intf.vlans | join(',') }}
+{% else %}
+ switchport mode access
+ switchport access vlan {{ intf.vlan }}
+{% endif %}
+ no shutdown
+!
+{% endfor %}
+
+yaml
+
+- name: render + push
+  cisco.ios.ios_config:
+    src: templates/base.cfg.j2
+    backup: yes
+
+Jinja2 با template + command
+yaml
+
+- name: render to file
+  template:
+    src: base.cfg.j2
+    dest: /tmp/base.cfg
+  delegate_to: localhost
+  changed_when: false
+
+- name: push via config replace
+  cisco.ios.ios_command:
+    commands:
+      - command: "configure replace flash:base.cfg force"
+        prompt: "\[confirm\]"
+        answer: "y"
+
+فیلترهای مفید
+jinja2
+
+{{ interfaces | selectattr('mode', 'equalto', 'trunk') | list }}
+{{ vlans | map(attribute='id') | join(',') }}
+{{ ansible_net_interfaces | dict2items | selectattr('value.operstatus', 'equalto', 'up') }}
+
+۱۳️⃣ Parsing Output
+parse_cli (بدون regex سخت)
+yaml
+
+- name: parse interfaces
+  cisco.ios.ios_command:
+    commands: [show ip interface brief]
+  register: raw
+
+- name: parse
+  ansible.utils.cli_parse:
+    text: "{{ raw.stdout[0] }}"
+    parser:
+      name: ansible.netcommon.native
+      command: show ip interface brief
+    set_fact: interfaces
+
+- debug:
+    var: interfaces
+
+Regex
+yaml
+
+- name: extract IPs
+  cisco.ios.ios_command:
+    commands: [show ip interface brief]
+  register: raw
+
+- name: parse with regex
+  set_fact:
+    interfaces: "{{ raw.stdout[0] | regex_findall('^(\\S+)\\s+(\\S+)\\s+\\S+\\s+\\S+\\s+(\\S+)\\s+(\\S+)', multiline=True) }}"
+
+- debug:
+    msg: "{{ interfaces }}"
+
+TTP (Template Text Parser)
+ttp
+
+# templates/interfaces.ttp
+<group name="interfaces">
+{{ interface }} {{ ip }} {{ ok }} {{ method }} {{ status }} {{ protocol }}
+</group>
+
+yaml
+
+- ansible.utils.cli_parse:
+    text: "{{ raw.stdout[0] }}"
+    parser:
+      name: ansible.utils.ttp
+      template_path: templates/interfaces.ttp
+  set_fact: interfaces
+
+XML (NETCONF)
+yaml
+
+- junipernetworks.junos.junos_command:
+    commands:
+      - command: show interfaces
+        display: xml
+  register: xml_out
+
+- ansible.utils.cli_parse:
+    text: "{{ xml_out.stdout[0] }}"
+    parser:
+      name: ansible.netcommon.xml
+    set_fact: parsed
+
+۱۴️⃣ Multi-Vendor Abstraction
+مشکل
+
+هر vendor command متفاوت دارد:
+bash
+
+# Cisco
+show ip interface brief
+# Juniper
+show interfaces terse
+# Arista
+show ip interface brief
+# NX-OS
+show ip interface brief
+
+راه‌حل ۱: include_tasks بر اساس vendor
+yaml
+
+- include_tasks: "{{ ansible_network_os.split('.')[-1] }}.yml"
+
+# tasks/ios.yml
+- cisco.ios.ios_config: ...
+# tasks/eos.yml
+- arista.eos.eos_config: ...
+
+راه‌حل ۲: Resource Modules (interface مشترک)
+yaml
+
+- name: common interface config
+  vars:
+    module_name: "{{ ansible_network_os.split('.')[-1] }}_interfaces"
+  action: "{{ ansible_network_os }}.{{ module_name }}"
+  args:
+    config:
+      - name: "{{ interface }}"
+        description: "{{ description }}"
+        enabled: true
+
+راه‌حل ۳: NAPALM (انتزاعی‌ترین)
+
+→ بخش ۱۷.
+راه‌حل ۴: netcommon (ansible.netcommon)
+yaml
+
+- name: unified
+  ansible.netcommon.cli_config:
+    config: |
+      hostname {{ inventory_hostname }}
+  # خودش connection را از ansible_network_os تشخیص می‌دهد
+
+۱۵️⃣ Compliance و Audit
+سناریو
+
+هر ساعت بررسی کن که config دستگاه با baseline منطبق است.
+Playbook
+yaml
+
+- hosts: network
+  gather_facts: no
+
+  tasks:
+    - name: gather config
+      cisco.ios.ios_command:
+        commands: [show running-config]
+      register: running
+      when: "'ios' in ansible_network_os"
+
+    - name: baseline check
+      assert:
+        that:
+          - "running.stdout[0] is search('ntp server 10.0.0.1')"
+          - "running.stdout[0] is search('service password-encryption')"
+          - "running.stdout[0] is search('logging host 10.0.0.3')"
+          - "running.stdout[0] is not search('^enable password')"
+        fail_msg: "{{ inventory_hostname }}: compliance failed"
+
+گزارش
+yaml
+
+- name: save audit
+  copy:
+    content: |
+      Host: {{ inventory_hostname }}
+      Time: {{ ansible_date_time.iso8601 }}
+      Status: {{ 'PASS' if (checks.passed | default(true)) else 'FAIL' }}
+      Checks:
+        - NTP: {{ running.stdout[0] is search('ntp server') }}
+        - SSH: {{ running.stdout[0] is search('ip ssh version 2') }}
+        - Telnet: {{ running.stdout[0] is not search('transport input telnet') }}
+    dest: "/var/audit/network/{{ inventory_hostname }}-{{ ansible_date_time.date }}.txt"
+  delegate_to: localhost
+
+با ansible.utils.validate
+yaml
+
+- name: validate against JSON schema
+  ansible.utils.validate:
+    data: "{{ interfaces.gathered }}"
+    criteria:
+      - "{{ lookup('file', 'schemas/interfaces.json') }}"
+    engine: ansible.utils.jsonschema
+
+۱۶️⃣ Rolling Changes و Safety
+اصول طلایی
+
+    serial: 1 برای تغییرات پرخطر
+
+    max_fail_percentage: 0 → یک fail = توقف کامل
+
+    any_errors_fatal: true → play متوقف شود
+
+    backup خودکار قبل از تغییر
+
+    confirm_commit (Junos)
+
+    configure replace + timer (Cisco)
+
+    --check روی staging اول
+
+الگوی امن
+yaml
+
+- hosts: dc1_core
+  gather_facts: no
+  serial: 1                    # ← یک در یک
+  any_errors_fatal: true       # ← fail = توقف
+  max_fail_percentage: 0
+
+  pre_tasks:
+    - name: backup
+      cisco.ios.ios_config:
+        backup: yes
+        backup_options:
+          dir_path: "/backups/{{ inventory_hostname }}"
+          filename: "pre-change-{{ ansible_date_time.iso8601 }}.cfg"
+
+    - name: record pre-change state
+      cisco.ios.ios_command:
+        commands: [show ip bgp summary]
+      register: pre_bgp
+
+  tasks:
+    - name: apply config
+      cisco.ios.ios_config:
+        lines:
+          - router bgp 65001
+          - neighbor 192.168.1.5 remote-as 65005
+        save_when: modified
+
+  post_tasks:
+    - name: wait for BGP
+      cisco.ios.ios_command:
+        commands:
+          - command: show bgp ipv4 unicast summary
+            wait_for: "192.168.1.5"
+            match: contains
+        retries: 30
+        interval: 10
+
+    - name: verify all peers
+      assert:
+        that:
+          - "'Established' in neighbors"
+
+Canary Deployment
+yaml
+
+- hosts: network
+  serial:
+    - 1              # canary
+    - 2              # small batch
+    - "25%"
+    - "100%"
+  max_fail_percentage: 10
+
+  tasks:
+    - name: deploy
+      include_tasks: deploy.yml
+
+  post_tasks:
+    - name: validate
+      include_tasks: validate.yml
+
+۱۷️⃣ NAPALM (لایه انتزاعی)
+چرا NAPALM؟
+
+یک library پایتون (و Ansible modules) که API یکسان برای vendorهای مختلف می‌دهد:
+python
+
+device.load_merge_candidate(config="...")
+device.commit_config()
+device.rollback()
+device.compare_config()
+
+yaml
+
+- name: NAPALM config
+  ansible.netcommon.napalm_configure:
+    configuration: |
+      hostname {{ inventory_hostname }}
+      ntp server 10.0.0.1
+    replace: false
+    dry_run: false
+
+- name: NAPALM get facts
+  ansible.netcommon.napalm_get:
+    getters:
+      - facts
+      - interfaces
+      - interfaces_ip
+      - bgp_neighbors
+      - lldp_neighbors
+  register: napalm
+
+- name: NAPALM rollback
+  ansible.netcommon.napalm_rollback:
+    checkpoint_file: latest
+
+Inventory برای NAPALM
+yaml
+
+sw01:
+  ansible_host: 10.0.0.1
+  ansible_connection: local       # یا network_cli
+  ansible_network_os: ios
+  ansible_user: ansible
+  ansible_password: "{{ vault_pw }}"
+  napalm_optional_args:
+    secret: "{{ vault_enable_password }}"
+
+نصب
+bash
+
+pip install napalm
+# driverهای: napalm-ios, napalm-junos, napalm-eos, napalm-nxos, ...
+
+مزایا / معایب
+✅	❌
+API یکسان	وابستگی اضافی
+Rollback	گاهی کُندتر
+Compare_config	کمتر از resource modules استفاده می‌شود
+getters (facts)	بعضی featureها جدید نیست
+
+توصیه: resource modules را ترجیح بده. NAPALM برای rollback و getters کاربرد دارد.
+۱۸️⃣ Workflows عملی
+۱۸.۱ Provisioning VLAN
+yaml
+
+- hosts: switches
+  gather_facts: no
+  serial: 5
+
+  vars:
+    vlans:
+      - { id: 10, name: users }
+      - { id: 20, name: servers }
+      - { id: 30, name: voice }
+
+  tasks:
+    - name: create VLANs
+      cisco.ios.ios_vlans:
+        config: "{{ vlans }}"
+        state: merged
+
+    - name: verify
+      cisco.ios.ios_command:
+        commands:
+          - show vlan brief
+      register: vlans_out
+
+    - debug:
+        var: vlans_out.stdout_lines[0]
+
+۱۸.۲ Configure BGP Peering
+yaml
+
+- hosts: border_routers
+  gather_facts: no
+  serial: 1
+  any_errors_fatal: true
+
+  vars:
+    local_as: 65001
+    peer_ip: 192.168.1.1
+    peer_as: 65002
+
+  tasks:
+    - name: backup
+      cisco.ios.ios_config:
+        backup: yes
+
+    - name: BGP config
+      cisco.ios.ios_bgp_global:
+        config:
+          as_number: "{{ local_as }}"
+          router_id: "{{ ansible_host }}"
+          log_neighbor_changes: true
+          neighbors:
+            - neighbor_address: "{{ peer_ip }}"
+              remote_as: "{{ peer_as }}"
+              description: "Peer with ISP"
+              update_source: Loopback0
+
+    - name: BGP AF config
+      cisco.ios.ios_bgp_address_family:
+        config:
+          as_number: "{{ local_as }}"
+          address_family:
+            - afi: ipv4
+              safi: unicast
+              neighbors:
+                - neighbor_address: "{{ peer_ip }}"
+                  activate: true
+                  route_map:
+                    - name: RM-IN
+                      in: true
+                    - name: RM-OUT
+                      out: true
+
+    - name: wait for established
+      cisco.ios.ios_command:
+        commands:
+          - command: show bgp ipv4 unicast summary
+            wait_for: "state = Established"
+            match: contains
+        retries: 30
+        interval: 10
+
+۱۸.۳ Configure OSPF
+yaml
+
+- hosts: routers
+  gather_facts: no
+
+  tasks:
+    - name: OSPF
+      cisco.ios.ios_ospfv2:
+        config:
+          processes:
+            - process_id: 1
+              router_id: "{{ loopback_ip }}"
+              log_adjacency_changes: true
+              networks:
+                - address: "10.0.0.0"
+                  wildcard_bits: "0.0.0.255"
+                  area: 0
+
+۱۸.۴ Configure ACL (Firewall Rule)
+yaml
+
+- hosts: border_routers
+  gather_facts: no
+
+  vars:
+    acl_name: BLOCK-MALICIOUS
+    blocked_subnets:
+      - "192.0.2.0"
+      - "198.51.100.0"
+
+  tasks:
+    - name: build ACEs
+      set_fact:
+        aces: |
+          {% for net in blocked_subnets %}
+          - grant: deny
+            protocol: ip
+            source: { address: "{{ net }}", wildcard_bits: "0.0.0.255" }
+            destination: { any: true }
+          {% endfor %}
+          - grant: permit
+            protocol: ip
+            source: { any: true }
+            destination: { any: true }
+
+    - name: apply ACL
+      cisco.ios.ios_acls:
+        config:
+          - afi: ipv4
+            acls:
+              - name: "{{ acl_name }}"
+                acl_type: extended
+                aces: "{{ aces | from_yaml }}"
+
+۱۸.۵ Firewall Rules (Fortinet)
+yaml
+
+- hosts: fortigate
+  gather_facts: no
+  connection: httpapi
+
+  tasks:
+    - name: create address
+      fortinet.fortios.fortios_firewall_address:
+        vdom: root
+        state: present
+        firewall_address:
+          name: "WEB-SERVER"
+          subnet: "10.10.10.10/32"
+
+    - name: create policy
+      fortinet.fortios.fortios_firewall_policy:
+        vdom: root
+        state: present
+        firewall_policy:
+          policyid: 100
+          name: "Allow-HTTP"
+          srcintf: [{ name: "port1" }]
+          dstintf: [{ name: "port2" }]
+          srcaddr: [{ name: "all" }]
+          dstaddr: [{ name: "WEB-SERVER" }]
+          service: [{ name: "HTTP" }]
+          action: accept
+          schedule: always
+          logtraffic: all
+
+۱۸.۶ Interface Config با Validation
+yaml
+
+- hosts: switches
+  gather_facts: no
+  serial: 1
+
+  vars:
+    desired_interfaces:
+      - { name: Gi1/0/1, description: "Uplink-Core", mode: trunk, vlans: [10,20] }
+      - { name: Gi1/0/2, description: "User-A", mode: access, vlan: 10 }
+
+  tasks:
+    - name: pre-check (interface exists?)
+      cisco.ios.ios_facts:
+        gather_subset: [interfaces]
+
+    - name: assert interface exists
+      assert:
+        that:
+          - item.name in ansible_net_interfaces
+        fail_msg: "{{ item.name }} not found on {{ inventory_hostname }}"
+      loop: "{{ desired_interfaces }}"
+
+    - name: configure
+      cisco.ios.ios_l2_interfaces:
+        config: "{{ desired_interfaces }}"
+        state: merged
+
+    - name: verify
+      cisco.ios.ios_command:
+        commands: [show interfaces status]
+      register: status
+
+    - assert:
+        that:
+          - "'connected' in status.stdout[0]"
+
+۱۹️⃣ Troubleshooting
+خطاهای رایج
+Unable to open shell
+text
+
+Unable to open shell, check the ssh connection and the ansible_network_os
+
+علت: ansible_network_os غلط یا نصب نیست.
+bash
+
+ansible-doc -t connection -l | grep -i network
+ansible-galaxy collection list | grep -E 'cisco|juniper|arista'
+
+Connection type ssh is not valid for this module
+text
+
+Connection type ssh is not valid for this module
+
+علت: ansible_connection: ssh روی ماژول network.
+
+راه‌حل:
+yaml
+
+ansible_connection: network_cli
+ansible_network_os: cisco.ios.ios
+
+Timeout (12s) waiting for privilege escalation
+
+علت: ansible_become_method: enable بدون رمز.
+yaml
+
+ansible_become: yes
+ansible_become_method: enable
+ansible_become_password: "{{ vault_enable_pw }}"
+
+% Invalid input detected
+
+علت: command در context اشتباه یا vendor اشتباه.
+
+رفع: -vvv بزن، خروجی CLI را ببین، در دستگاه دستی امتحان کن.
+Command timeout
+
+علت: command طولانی (show tech, show run بزرگ).
+
+رفع:
+yaml
+
+ansible_command_timeout: 300
+ansible_connect_timeout: 60
+
+Persistent connection idle timeout
+
+رفع:
+ini
+
+[persistent_connection]
+connection_timeout = 120
+command_timeout = 120
+
+ssh key exchange failed
+
+علت: الگوریتم قدیمی روی دستگاه، client جدید.
+
+رفع:
+yaml
+
+ansible_network_cli_ssh_type: paramiko
+# یا
+# اضافه کردن به ssh config دستگاه:
+# ip ssh server algorithm kex ...
+
+دیباگ
+bash
+
+# verbose
+ansible-playbook site.yml -vvvv
+
+# فقط یک host
+ansible-playbook site.yml --limit sw01 -vvv
+
+# debug connection
+ANSIBLE_DEBUG=1 ansible -m ping sw01
+
+# بررسی ansible_network_os
+ansible-inventory --host sw01
+
+# تست اتصال
+ansible sw01 -m cisco.ios.ios_command -a "commands='show version'"
+
+Cleanup
+bash
+
+# سوکت‌های stuck
+rm -rf ~/.ansible/pc/*
+
+# kill connection daemon
+pkill -f ansible-connection
+
+۲۰️⃣ Security Best Practices
+SSH Key (نه password)
+yaml
+
+all:
+  vars:
+    ansible_user: ansible
+    ansible_ssh_private_key_file: /etc/ansible/keys/network_rsa
+    ansible_network_cli_ssh_type: libssh
+
+Credentials در vault
+yaml
+
+ansible_password: "{{ vault_network_password }}"
+ansible_become_password: "{{ vault_enable_password }}"
+
+no_log روی حساس
+yaml
+
+- name: AAA config
+  cisco.ios.ios_config:
+    lines:
+      - "tacacs server TAC1"
+      - "key {{ vault_tacacs_key }}"
+  no_log: true
+
+TACACS+ / RADIUS
+yaml
+
+- name: TACACS
+  cisco.ios.ios_config:
+    lines:
+      - aaa new-model
+      - aaa authentication login default group tacacs+ local
+      - aaa authorization exec default group tacacs+ local
+      - tacacs server TAC1
+      - " address ipv4 10.0.0.10"
+      - " key {{ vault_tacacs_key }}"
+  no_log: true
+
+SSH hardening (روی دستگاه)
+yaml
+
+- name: SSH hardening
+  cisco.ios.ios_config:
+    lines:
+      - ip ssh version 2
+      - ip ssh time-out 60
+      - ip ssh authentication-retries 3
+      - no ip http server
+      - no ip http secure-server
+      - transport input ssh
+    parents:
+      - line vty 0 4
+
+Backup با credentials جداگانه
+yaml
+
+- name: read-only backup
+  cisco.ios.ios_command:
+    commands: [show running-config]
+  # با کاربر backup (read-only در TACACS+)
+  vars:
+    ansible_user: backup_ro
+    ansible_password: "{{ vault_backup_pw }}"
+  # توجه: این override فقط برای این task
+
+no_log روی ios_config با password
+yaml
+
+- name: enable secret
+  cisco.ios.ios_config:
+    lines:
+      - "enable secret {{ vault_enable_secret }}"
+  no_log: true
+
+Control node hardening
+
+    Bastion host برای دسترسی به network devices
+
+    ssh_known_hosts مرکزی
+
+    Auditd روی /etc/ansible/keys
+
+    chmod 600 روی کلیدها
+
+    chmod 640 روی vault
+
+۲۱️⃣ Performance و Scale
+تنظیمات سریع
+ini
+
+[defaults]
+forks = 50
+gathering = explicit          # network → خودت gather کن
+host_key_checking = True
+
+[persistent_connection]
+connection_timeout = 60
+command_timeout = 60
+
+libssh
+bash
+
+pip install ansible-pylibssh
+
+yaml
+
+ansible_network_cli_ssh_type: libssh
+
+۳-۵ برابر سریع‌تر از paramiko.
+serial برای hundreds of devices
+yaml
+
+- hosts: all_switches
+  serial: 50
+  strategy: linear
+
+async برای commandهای طولانی
+yaml
+
+- name: long backup
+  cisco.ios.ios_config:
+    backup: yes
+  async: 600
+  poll: 5
+
+python ThreadPool
+python
+
+from concurrent.futures import ThreadPoolExecutor
+import ansible_runner
+
+def deploy(host):
+    return ansible_runner.run(
+        private_data_dir='/opt/ansible',
+        playbook='network.yml',
+        limit=host,
+        quiet=True,
+    )
+
+with ThreadPoolExecutor(max_workers=10) as ex:
+    [ex.submit(deploy, h).result() for h in hosts]
+
+strategy: free
+yaml
+
+- hosts: all_switches
+  strategy: free
+  serial: 50
+
+۲۲️⃣ Recipes آماده
+۲۲.۱ Initial Provisioning از Zero Touch
+yaml
+
+- hosts: new_switches
+  gather_facts: no
+  serial: 5
+
+  tasks:
+    - name: base config
+      cisco.ios.ios_config:
+        lines:
+          - hostname {{ inventory_hostname }}
+          - no ip domain lookup
+          - ip domain name example.com
+          - username ansible privilege 15 secret {{ vault_ansible_pw }}
+          - ip ssh version 2
+          - crypto key generate rsa modulus 2048
+        save_when: changed
+
+    - name: management interface
+      cisco.ios.ios_l3_interfaces:
+        config:
+          - name: Vlan100
+            ipv4:
+              - address: "{{ mgmt_ip }}/24"
+
+    - name: default route
+      cisco.ios.ios_config:
+        lines:
+          - ip default-gateway {{ mgmt_gw }}
+
+    - name: NTP
+      cisco.ios.ios_config:
+        lines:
+          - ntp server 10.0.0.1
+          - ntp server 10.0.0.2
+
+    - name: AAA
+      cisco.ios.ios_config:
+        lines:
+          - aaa new-model
+          - aaa authentication login default group tacacs+ local
+          - aaa authorization exec default group tacacs+ local
+        # + tacacs config
+
+    - name: save
+      cisco.ios.ios_command:
+        commands: [write memory]
+
+۲۲.۲ Config Drift Detection (روزانه)
+yaml
+
+- hosts: network
+  gather_facts: no
+
+  tasks:
+    - name: current config
+      cisco.ios.ios_command:
+        commands: [show running-config]
+      register: current
+      when: "'ios' in ansible_network_os"
+
+    - name: baseline
+      set_fact:
+        baseline: "{{ lookup('file', 'baselines/' + inventory_hostname + '.cfg') }}"
+      when: current is succeeded
+
+    - name: diff
+      set_fact:
+        drift: "{{ current.stdout[0] | difference(baseline.split('\n')) }}"
+      when: current is succeeded
+
+    - name: alert
+      slack:
+        msg: "Config drift on {{ inventory_hostname }}: {{ drift | length }} lines"
+      when: drift | length > 0
+      delegate_to: localhost
+
+۲۲.۳ Rollback روی خطا
+yaml
+
+- hosts: switches
+  gather_facts: no
+  serial: 1
+  any_errors_fatal: true
+
+  tasks:
+    - block:
+        - name: backup
+          cisco.ios.ios_config:
+            backup: yes
+
+        - name: change
+          cisco.ios.ios_config:
+            lines:
+              - "{{ item }}"
+          loop: "{{ changes }}"
+
+        - name: verify
+          cisco.ios.ios_command:
+            commands: [show ip interface brief]
+            wait_for: "connected"
+            match: contains
+          retries: 5
+
+      rescue:
+        - name: rollback
+          cisco.ios.ios_command:
+            commands:
+              - command: "configure replace flash:backup.cfg force"
+                prompt: "\[confirm\]"
+                answer: "y"
+
+        - name: notify
+          slack:
+            msg: "Rolled back {{ inventory_hostname }}"
+          delegate_to: localhost
+
+۲۲.۴ Inventory Sync با Network (LLDP)
+yaml
+
+- hosts: network
+  gather_facts: no
+
+  tasks:
+    - name: gather LLDP
+      cisco.ios.ios_facts:
+        gather_subset: [interfaces]
+        gather_network_resources: [lldp_neighbors]
+      when: "'ios' in ansible_network_os"
+
+    - name: save topology
+      copy:
+        content: "{{ ansible_net_neighbors | to_nice_json }}"
+        dest: "/var/topology/{{ inventory_hostname }}.json"
+      delegate_to: localhost
+
+۲۲.۵ Multi-Vendor Rollout (IOS + EOS + Junos)
+yaml
+
+# tasks/common-ntp.yml
+- name: Cisco IOS
+  cisco.ios.ios_config:
+    lines:
+      - "ntp server {{ ntp_server }}"
+  when: "'ios' in ansible_network_os"
+
+- name: Arista EOS
+  arista.eos.eos_config:
+    lines:
+      - "ntp server {{ ntp_server }}"
+  when: "'eos' in ansible_network_os"
+
+- name: Juniper
+  junipernetworks.junos.junos_config:
+    lines:
+      - "set system ntp server {{ ntp_server }}"
+    confirm_commit: 5
+  when: "'junos' in ansible_network_os"
+
+۲۲.۶ Firmware Upgrade
+yaml
+
+- hosts: switches
+  gather_facts: no
+  serial: 1
+  any_errors_fatal: true
+
+  vars:
+    target_image: cat9k_iosxe.17.09.04a.SPA.bin
+    tftp_server: 10.0.0.100
+
+  pre_tasks:
+    - name: check current
+      cisco.ios.ios_command:
+        commands: [show version]
+      register: ver
+
+    - name: verify not already
+      meta: end_host
+      when: target_image in ver.stdout[0]
+
+    - name: backup config
+      cisco.ios.ios_config:
+        backup: yes
+
+  tasks:
+    - name: copy image
+      cisco.ios.ios_command:
+        commands:
+          - "copy tftp://{{ tftp_server }}/{{ target_image }} flash:"
+        # prompt handling
+
+    - name: set boot
+      cisco.ios.ios_config:
+        lines:
+          - "boot system flash:{{ target_image }}"
+
+    - name: save
+      cisco.ios.ios_command:
+        commands: [write memory]
+
+    - name: reload
+      cisco.ios.ios_command:
+        commands:
+          - command: reload
+            prompt: "\[confirm\]"
+            answer: "y"
+
+    - name: wait for device
+      wait_for_connection:
+        timeout: 600
+
+    - name: verify new version
+      cisco.ios.ios_command:
+        commands: [show version]
+      register: ver2
+
+    - assert:
+        that:
+          - target_image in ver2.stdout[0]
+
+📊 جدول انتخاب سریع
+کار	ماژول
+Show command	ios_command / eos_command
+Config دستی	ios_config / eos_config
+Interface	ios_interfaces / ios_l3_interfaces
+VLAN	ios_vlans
+BGP	ios_bgp_global / ios_bgp_address_family
+OSPF	ios_ospfv2
+ACL	ios_acls
+SNMP	ios_snmp_server
+Backup	ios_config backup: yes
+Restore	ios_config src: ... + replace: block
+Fact	ios_facts
+Diff	ios_config diff_against: startup
+Rollback (Cisco)	configure replace
+Rollback (Junos)	confirm_commit
+Multi-vendor	ansible.netcommon.cli_config
+Parsing	ansible.utils.cli_parse
+Firewall Fortinet	fortinet.fortios.fortios_firewall_policy
+Firewall Palo Alto	paloaltonetworks.panos.panos_rule
+F5	f5networks.f5_modules.bigip_virtual_server
+MikroTik	community.routeros.command
+🎓 ۱۵ قانون طلایی Network Automation
+
+    ansible_network_os FQCN — نه نام کوتاه
+
+    network_cli + ansible_become_method: enable برای Cisco
+
+    netconf برای Juniper (سریع + transactional)
+
+    backup: yes قبل از هر تغییر
+
+    serial: 1 برای تغییر پرخطر
+
+    max_fail_percentage: 0 برای تغییر حیاتی
+
+    any_errors_fatal: true برای abort
+
+    --check --diff روی staging اول
+
+    confirm_commit: 5 در Junos
+
+    configure replace + timer در Cisco
+
+    libssh برای سرعت
+
+    Resource modules > ios_config
+
+    no_log: true روی TACACS/SNMP/password
+
+    ansible_command_timeout برای command طولانی
+
+    Rollback plan همیشه
+
+🔗 Collections و لینک‌ها
+text
+
+ansible.netcommon          ← پایه
+ansible.utils              ← parsing/validate
+cisco.ios / cisco.nxos / cisco.iosxr
+arista.eos
+junipernetworks.junos
+paloaltonetworks.panos
+fortinet.fortios
+f5networks.f5_modules
+vyos.vyos
+community.routeros
+cumulusnetworks.nclu
+dellemc.os10
+nokia.sros
+
+    docs.ansible.com/ansible/latest/network/
+
+    galaxy.ansible.com
+
+    github.com/ansible-collections

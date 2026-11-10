@@ -1,0 +1,2732 @@
+﻿🛡️ Best Practices جامع Ansible برای DevOps/Infrastructure Engineers — با تمرکز بر امنیت Production
+
+    این مرجع ترکیبی از best practices عمومی و الزامات امنیتی است که در محیط‌های عملیاتی (بانک، تلکام، SaaS، Enterprise) استفاده می‌شود. هر بخش با: اصل → چرایی → مثال غلط → مثال درست → ملاحظات فنی → چک‌لیست ارائه می‌شود.
+
+📑 فهرست
+text
+
+۱.  معماری Control Node
+۲.  مدیریت کانفیگ (ansible.cfg)
+۳.  احراز هویت SSH
+۴.  Privilege Escalation (become)
+۵.  Secrets و Vault
+۶.  Inventory امن
+۷.  امنیت Playbook و Task
+۸.  Collections/Roles/Plugins
+۹.  Network Isolation
+۱۰. Logging و Auditing
+۱۱. CI/CD Security
+۱۲. Filesystem Permissions
+۱۳. Fact Management
+۱۴. Error Handling و Resilience
+۱۵. Testing و Validation
+۱۶. Change Management
+۱۷. Monitoring و Alerting
+۱۸. Incident Response
+۱۹. Compliance و Governance
+۲۰. چک‌لیست نهایی Production
+
+۱️⃣ معماری Control Node — پایه امنیت
+اصل: جداسازی و Least Privilege
+❌ آنتی‌پترن: اجرای Ansible از laptop شخصی
+bash
+
+# روی laptop شخصی مهندس
+$ ansible-playbook -i prod site.yml -u root
+# مشکلات:
+# - کلید شخصی = دسترسی کامل به همه prod
+# - لاگ محلی = بدون audit
+# - laptop گم/دزدیده = فاجعه
+# - کنسول shell history = leak
+
+✅ الگوی درست: Dedicated Control Node
+text
+
+┌─────────────────────────────────────────────────┐
+│  Ansible Control Node (dedicated VM)            │
+│  ├─ OS: hardened RHEL 9 / Ubuntu 22.04          │
+│  ├─ User: ansible (uid 1001, non-root)          │
+│  ├─ sudoers: محدود به whitelist                 │
+│  ├─ SSH: از bastion فقط                          │
+│  ├─ Vault: از secret manager                    │
+│  ├─ Logs: به SIEM مرکزی                         │
+│  └─ Backup: روزانه + weekly audit              │
+└─────────────────────────────────────────────────┘
+        │ SSH (key-only, cert-based)
+        ▼
+┌─────────────────────────────────────────────────┐
+│  Target Hosts (behind bastion)                  │
+└─────────────────────────────────────────────────┘
+
+تنظیمات سخت‌سازی Control Node
+bash
+
+# 1. user اختصاصی
+sudo useradd -m -s /bin/bash -G wheel ansible
+sudo passwd -l ansible           # قفل رمز (فقط SSH key)
+sudo usermod -aG docker ansible  # اگر لازم
+
+# 2. sudoers محدود
+sudo tee /etc/sudoers.d/ansible <<'EOF'
+Defaults:ansible !requiretty
+Defaults:ansible !visiblepw
+Defaults:ansible env_reset
+Defaults:ansible secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Defaults:ansible timestamp_timeout=0
+ansible ALL=(root) NOPASSWD: /usr/bin/dnf, /usr/bin/apt, /usr/bin/systemctl, /usr/bin/dpkg, /usr/bin/rpm
+EOF
+sudo chmod 440 /etc/sudoers.d/ansible
+sudo visudo -cf /etc/sudoers.d/ansible
+
+# 3. SSH hardening (روی کنترل نود)
+sudo tee /etc/ssh/sshd_config.d/99-hardening.conf <<'EOF'
+PermitRootLogin no
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PubkeyAuthentication yes
+AuthenticationMethods publickey
+AllowUsers ansible
+MaxAuthTries 3
+LoginGraceTime 30
+ClientAliveInterval 300
+ClientAliveCountMax 2
+X11Forwarding no
+AllowAgentForwarding no
+AllowTcpForwarding no
+PermitTunnel no
+EOF
+sudo systemctl reload sshd
+
+# 4. فایروال (فقط SSH از bastion)
+sudo firewall-cmd --permanent --add-rich-rule='rule family="ipv4" source address="10.0.0.0/24" service name="ssh" accept'
+sudo firewall-cmd --permanent --remove-service=ssh
+sudo firewall-cmd --reload
+
+# 5. auditd روی فایل‌های حساس
+sudo tee /etc/audit/rules.d/ansible.rules <<'EOF'
+-w /etc/ansible -p wa -k ansible_config
+-w /opt/ansible-venv -p wa -k ansible_bin
+-w /etc/sudoers.d -p wa -k sudoers_change
+-w /home/ansible/.ssh -p wa -k ssh_keys
+-w /var/log/ansible.log -p wa -k ansible_log
+EOF
+sudo augenrules --load
+
+# 6. disable unused services
+for svc in telnet.socket rsh.socket rlogin.socket tftp.socket; do
+  sudo systemctl disable --now $svc 2>/dev/null || true
+done
+
+Separation of duties
+نقش	دسترسی
+Ansible developer	git push به branch، بدون اجرا روی prod
+Ansible operator	اجرای playbook روی staging/prod (با approval)
+Ansible admin	تغییر ansible.cfg، vault، نقش‌ها
+Security team	audit log، review PR
+
+مثال RBAC با AAP/AWX:
+
+    Organization: ops
+
+    Teams: developers (write staging)، operators (run prod)، admins (all)
+
+    Credentials: جدا برای هر environment
+
+    Inventories: read-only برای developers
+
+۲️⃣ مدیریت کانفیگ — ansible.cfg امن
+اصل: Explicit > Implicit + Secure Defaults
+✅ قالب Production امن
+ini
+
+[defaults]
+# --- Inventory و مسیرها ---
+inventory              = /etc/ansible/inventory
+roles_path             = /etc/ansible/roles
+collections_path       = /etc/ansible/collections
+library                = /etc/ansible/library
+
+# --- اتصال ---
+remote_user            = deploy
+transport              = smart
+timeout                = 15
+forks                  = 20
+
+# --- امنیت SSH ---
+host_key_checking      = True
+ask_pass               = False
+ask_sudo_pass          = False
+
+# --- Fact management ---
+gathering              = smart
+gather_subset          = min,network,virtual
+fact_caching           = jsonfile
+fact_caching_connection = /var/cache/ansible/facts
+fact_caching_timeout   = 7200
+inject_facts_as_vars   = False
+
+# --- متغیرها ---
+hash_behaviour         = replace
+error_on_undefined_vars = True
+allow_unsafe_lookups   = False
+
+# --- امنیت فایل temp ---
+allow_world_readable_tmpfiles = False
+remote_tmp             = ~/.ansible/tmp
+
+# --- لاگ ---
+log_path               = /var/log/ansible.log
+stdout_callback        = yaml
+callbacks_enabled      = profile_tasks, timer, junit
+display_skipped_hosts  = False
+display_ok_hosts       = True
+show_task_path_on_failure = True
+
+# --- retry ---
+retry_files_enabled    = True
+retry_files_save_path  = /var/lib/ansible/retry
+
+# --- interpreter ---
+interpreter_python     = /usr/bin/python3
+
+# --- collections ---
+collections_on_ansible_version_mismatch = error
+
+[privilege_escalation]
+become                 = False           # ← play decides
+become_method          = sudo
+become_user            = root
+become_flags           = -H -S -n
+become_ask_pass        = False
+
+[ssh_connection]
+pipelining             = True
+ssh_args               = -C -o ControlMaster=auto -o ControlPersist=300s -o PreferredAuthentications=publickey -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/ssh/ssh_known_hosts -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=3
+ssh_executable         = /usr/bin/ssh
+control_path_dir       = /var/lib/ansible/cp
+ssh_transfer_method    = piped
+scp_if_ssh             = False
+sftp_batch_mode        = True
+
+[inventory]
+enable_plugins         = yaml, ini
+unparsed_is_failed     = True
+ignore_extensions      = .pyc, .pyo, .swp, .bak, ~, .rpm, .md, .txt, .rst, .orig, .cfg, .retry, .vault
+
+[galaxy]
+server                 = https://automation-hub.internal/api/galaxy/
+ignore_certs           = False
+
+[persistent_connection]
+connection_timeout     = 60
+command_timeout        = 60
+control_path_dir       = /var/lib/ansible/pc
+
+آنتی‌پترن‌های رایج
+ini
+
+# ❌ NEVER in production
+host_key_checking = False                        # MITM
+allow_world_readable_tmpfiles = True             # secret leak
+gather_subset = all                              # کند + سطح حمله
+interpreter_python = auto                        # unpredict
+hash_behaviour = merge                           # silent override
+[galaxy] ignore_certs = True                     # MITM
+inject_facts_as_vars = True                      # variable collision
+log_path = /tmp/ansible.log                      # world readable
+
+Permissions
+bash
+
+sudo chown root:ansible /etc/ansible/ansible.cfg
+sudo chmod 640 /etc/ansible/ansible.cfg
+sudo chown -R root:ansible /etc/ansible
+sudo find /etc/ansible -type d -exec chmod 750 {} \;
+sudo find /etc/ansible -type f -exec chmod 640 {} \;
+sudo find /etc/ansible -name "*.key" -exec chmod 600 {} \;
+sudo chmod 600 /etc/ansible/.vault_pass
+sudo chmod 700 /var/lib/ansible/cp
+sudo chmod 755 /var/log/ansible.log  # یا 640 root:adm
+
+اولویت‌ها (بالا به پایین — بالاتر برنده)
+text
+
+1. ANSIBLE_* env vars       ⚠️ خطر: مهاجم می‌تواند set کند
+2. CLI args                 ⚠️ تاریخچه shell
+3. $ANSIBLE_CONFIG
+4. ./ansible.cfg            ⚠️ اگر cwd attacker-controlled
+5. ~/.ansible.cfg
+6. /etc/ansible/ansible.cfg ✅ فقط در production
+
+توصیه: در production، فقط /etc/ansible/ansible.cfg استفاده کن. ANSIBLE_* env vars را در shell profiles بلاک کن:
+bash
+
+# /etc/profile.d/ansible-lock.sh
+unset ANSIBLE_CONFIG ANSIBLE_INVENTORY ANSIBLE_VAULT_PASSWORD_FILE
+unset ANSIBLE_HOST_KEY_CHECKING ANSIBLE_PRIVATE_KEY_FILE
+
+۳️⃣ احراز هویت SSH — فقط Key + CA
+اصل: No passwords, key-only, host CA for scale
+❌ آنتی‌پترن: رمز SSH یا host_key_checking = False
+yaml
+
+# inventory - ❌
+all:
+  vars:
+    ansible_password: "secret123"
+    ansible_ssh_common_args: '-o StrictHostKeyChecking=no'
+
+✅ الگوی درست: SSH Key + CA
+bash
+
+# 1. تولید کلید Ed25519 (نه RSA)
+ssh-keygen -t ed25519 -a 100 -C "ansible-deploy@control" -f ~/.ssh/ansible_deploy
+chmod 600 ~/.ssh/ansible_deploy
+
+# 2. SSH CA برای host verification (مقیاس‌پذیر)
+# روی CA server
+ssh-keygen -t ed25519 -f /root/ssh_ca -C "ssh-host-ca"
+
+# امضای host key هر سرور
+ssh-keygen -s /root/ssh_ca -I "web01" -h -n "web01,web01.example.com,10.0.0.1" \
+  -V +52w /etc/ssh/ssh_host_ed25519_key.pub
+# → /etc/ssh/ssh_host_ed25519_key-cert.pub
+
+# 3. توزیع CA public key
+sudo tee /etc/ssh/ssh_known_hosts.d/ca <<'EOF'
+@cert-authority *.example.com ssh-ed25519 AAAA...
+EOF
+
+# 4. client config
+sudo tee /etc/ssh/ssh_config.d/ansible.conf <<'EOF'
+Host *.example.com
+  HostKeyAlias %h
+  StrictHostKeyChecking yes
+  UserKnownHostsFile /etc/ssh/ssh_known_hosts
+  PreferredAuthentications publickey
+  PasswordAuthentication no
+  KbdInteractiveAuthentication no
+  IdentitiesOnly yes
+  IdentityFile /etc/ansible/keys/ansible_deploy
+EOF
+
+SSH Agent + ProxyJump (bastion)
+bash
+
+# از bastion برای دسترسی به internal
+cat > ~/.ssh/config <<'EOF'
+Host bastion.example.com
+  HostName bastion.example.com
+  User jump
+  IdentityFile /etc/ansible/keys/ansible_deploy
+  IdentitiesOnly yes
+
+Host *.internal
+  ProxyJump bastion.example.com
+  User deploy
+  IdentityFile /etc/ansible/keys/ansible_deploy
+  StrictHostKeyChecking yes
+EOF
+
+yaml
+
+# inventory
+all:
+  vars:
+    ansible_ssh_common_args: '-o ProxyJump=bastion.example.com -o StrictHostKeyChecking=yes'
+
+مدیریت authorized_keys
+yaml
+
+# ❌ خطر: exclusive با root
+- authorized_key:
+    user: root
+    key: "{{ admin_key }}"
+    exclusive: yes    # ← قفل خودتان می‌شوید اگر کلید نباشد
+
+# ✅ امن
+- name: distribute keys per user
+  authorized_key:
+    user: "{{ item.user }}"
+    key: "{{ lookup('file', 'keys/' + item.key + '.pub') }}"
+    state: present
+    key_options: "{{ item.options | default(omit) }}"
+  loop: "{{ auth_users }}"
+  # با key_options برای محدودیت:
+  # from="10.0.0.0/24",no-port-forwarding,no-agent-forwarding,no-pty
+
+SSH Server hardening (روی هاست‌های هدف)
+yaml
+
+# roles/ssh-hardening/templates/sshd_config.j2
+Port {{ ssh_port | default(22) }}
+PermitRootLogin no
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PubkeyAuthentication yes
+AuthenticationMethods publickey
+MaxAuthTries 3
+MaxSessions 5
+LoginGraceTime 30
+ClientAliveInterval 300
+ClientAliveCountMax 2
+AllowUsers {{ ssh_allowed_users | join(' ') }}
+HostbasedAuthentication no
+IgnoreRhosts yes
+PermitEmptyPasswords no
+X11Forwarding no
+AllowAgentForwarding no
+AllowTcpForwarding no
+PermitTunnel no
+Banner /etc/issue.net
+Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com
+MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com
+KexAlgorithms curve25519-sha256,diffie-hellman-group16-sha512
+
+yaml
+
+- name: deploy sshd hardening
+  template:
+    src: sshd_config.j2
+    dest: /etc/ssh/sshd_config
+    mode: '0600'
+    owner: root
+    validate: 'sshd -t -f %s'
+  notify: restart sshd
+
+- name: test ssh before restart
+  shell: |
+    sshd -t && ssh -p {{ ssh_port }} -o ConnectTimeout=5 -o BatchMode=yes localhost true
+  delegate_to: "{{ inventory_hostname }}"
+  changed_when: false
+
+۴️⃣ Privilege Escalation — Least Privilege
+اصل: become فقط جایی که لازم است + whitelist
+❌ آنتی‌پترن: become سراسری + NOPASSWD ALL
+yaml
+
+# ❌
+- hosts: all
+  become: true
+  become_user: root
+  # تمام taskها روت اجرا می‌شوند
+
+sudoers
+
+# ❌ فاجعه
+ansible ALL=(ALL) NOPASSWD: ALL
+
+✅ الگوی درست
+yaml
+
+# ✅ become در task level
+- hosts: webservers
+  become: false
+  tasks:
+    - name: read config
+      slurp: src=/etc/nginx/nginx.conf
+
+    - name: install packages
+      apt: { name: nginx, state: present }
+      become: true
+      become_user: root
+
+    - name: app task as app user
+      pip:
+        requirements: /opt/app/requirements.txt
+        virtualenv: /opt/app/venv
+      become: true
+      become_user: app
+
+sudoers
+
+# ✅ whitelist دقیق
+ansible ALL=(root) NOPASSWD: /usr/bin/apt, /usr/bin/dpkg, /usr/bin/apt-get
+ansible ALL=(root) NOPASSWD: /usr/bin/systemctl restart nginx, /usr/bin/systemctl reload nginx
+ansible ALL=(root) NOPASSWD: /usr/bin/dnf, /usr/bin/rpm
+
+# با alias برای خوانایی
+Cmnd_Alias PKG = /usr/bin/apt, /usr/bin/apt-get, /usr/bin/dpkg, /usr/bin/dnf, /usr/bin/rpm
+Cmnd_Alias SVC = /usr/bin/systemctl restart nginx, /usr/bin/systemctl reload nginx
+ansible ALL=(root) NOPASSWD: PKG, SVC
+
+Hardening sudoers
+bash
+
+# /etc/sudoers.d/00-hardening
+Defaults use_pty
+Defaults logfile=/var/log/sudo.log
+Defaults log_input, log_output
+Defaults iolog_dir=/var/log/sudo-io
+Defaults env_reset
+Defaults secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Defaults timestamp_timeout=0
+Defaults passwd_tries=3
+Defaults !visiblepw
+Defaults always_set_home
+Defaults requiretty  # یا !requiretty برای pipelining
+
+become_ask_pass در محیط حساس
+yaml
+
+# playbook
+- hosts: production
+  become: true
+  vars:
+    ansible_become_pass: "{{ lookup('env', 'BECOME_PASS') }}"
+
+bash
+
+# اجرا با prompt
+read -s BECOME_PASS && export BECOME_PASS
+ansible-playbook -K site.yml  # یا بدون -K، env می‌خواند
+unset BECOME_PASS
+
+نکته امنیتی: هرگز رمز را در CLI arg یا history نگذار. از read -s یا password manager helper.
+Audit log sudo
+bash
+
+# هر دستور sudo توسط ansible لاگ می‌شود
+sudo -u ansible sudo dnf install nginx
+# → /var/log/sudo.log + /var/log/sudo-io/...
+
+۵️⃣ Secrets و Vault — هیچ رمزی در plaintext
+اصل: Vault برای همه چیز، رمز vault از secret manager
+❌ آنتی‌پترن‌ها
+yaml
+
+# ❌ plaintext در vars
+db_password: "SuperSecret123"
+api_key: "sk-abc123..."
+
+# ❌ Vault password در ansible.cfg
+[defaults]
+vault_password_file = /etc/ansible/.vault_pass  # ← رمز در git
+
+# ❌ inline secret در playbook
+- uri:
+    url: "https://api/user/{{ user }}?password=hardcoded123"
+
+# ❌ secret در log
+- debug:
+    msg: "Password is {{ db_password }}"  # ← در ansible.log ذخیره می‌شود
+
+✅ الگوی درست — Multi-Layer
+text
+
+Layer 1: Vault-encrypted file (in git)
+    ↓
+Layer 2: Vault password از HashiCorp Vault / AWS Secrets Manager
+    ↓
+Layer 3: Vault password script فقط روی کنترل نود
+    ↓
+Layer 4: no_log: true روی task
+    ↓
+Layer 5: Log scrubbing در SIEM
+
+ساختار فایل‌ها
+text
+
+group_vars/
+├── all.yml
+├── prod/
+│   ├── vars.yml           # plaintext (non-sensitive)
+│   └── vault.yml          # ansible-vault encrypted
+host_vars/
+└── db01.yml               # اگر رمز host-specific
+
+Encrypt با vault-id (multi-environment)
+bash
+
+# رمز production vault در HashiCorp Vault
+cat > /etc/ansible/vault-prod.sh <<'EOF'
+#!/bin/bash
+vault kv get -field=password secret/ansible/vault-prod
+EOF
+chmod 700 /etc/ansible/vault-prod.sh
+
+# encrypt با id مشخص
+ansible-vault encrypt --vault-id prod@/etc/ansible/vault-prod.sh \
+  group_vars/prod/vault.yml
+
+# فایل شروع می‌شود با:
+# $ANSIBLE_VAULT;1.2;AES256;prod
+
+# اجرا
+ansible-playbook site.yml --vault-id prod@/etc/ansible/vault-prod.sh
+
+Inline secrets در playbook — encrypt_string
+bash
+
+ansible-vault encrypt_string --vault-id prod@/etc/ansible/vault-prod.sh \
+  'SuperSecret' --name 'db_password'
+
+خروجی:
+yaml
+
+db_password: !vault |
+  $ANSIBLE_VAULT;1.2;AES256;prod
+  3032333434363639303732353864386265
+  ...
+
+no_log — حیاتی
+yaml
+
+- name: create db user
+  community.mysql.mysql_user:
+    name: app
+    password: "{{ vault_db_password }}"
+    priv: "app_db.*:SELECT,INSERT,UPDATE,DELETE"
+  no_log: true
+
+# loop حساس - label برای debug
+- name: create users
+  user:
+    name: "{{ item.name }}"
+    password: "{{ item.pw_hash }}"
+  loop: "{{ users }}"
+  loop_control:
+    label: "{{ item.name }}"        # فقط name نمایش داده شود
+  no_log: true
+
+# block-level
+- block:
+    - uri:
+        url: "{{ api_url }}/token"
+        method: POST
+        body: { client_secret: "{{ vault_secret }}" }
+    - set_fact: token="{{ response.json.access_token }}"
+  no_log: true
+
+Return values حساس
+yaml
+
+# register + no_log
+- name: get token
+  uri:
+    url: "{{ auth_url }}"
+    body_format: json
+    body: { user: "{{ user }}", pass: "{{ vault_pass }}" }
+  register: auth
+  no_log: true
+
+# اگر token در log لو نرود
+- debug:
+    msg: "Got token ending {{ auth.json.token[-4:] }}"
+  no_log: false
+
+Secret manager integration
+yaml
+
+# HashiCorp Vault
+- name: get secret
+  community.hashi_vault.vault_kv2_get:
+    url: "{{ vault_addr }}"
+    auth_method: approle
+    role_id: "{{ vault_role_id }}"
+    secret_id: "{{ vault_secret_id }}"
+    engine_mount_point: secret
+    path: apps/prod/db
+  register: db_secret
+  no_log: true
+
+# AWS Secrets Manager
+- name: get from AWS
+  amazon.aws.secret_manager_secret:
+    secret_id: prod/db/password
+  register: secret
+  no_log: true
+
+# Azure Key Vault
+- name: get from Azure
+  azure.azcollection.azure_rm_keyvaultsecret_info:
+    vault_uri: https://myvault.vault.azure.net
+    name: db-password
+
+Vault password — Never in git
+bash
+
+# ❌ هرگز
+echo "vault_pass" > .vault_pass
+git add .vault_pass
+
+# ✅ در .gitignore
+echo ".vault_pass" >> .gitignore
+echo "*.vault_pass" >> .gitignore
+echo "vault-*.sh" >> .gitignore
+
+# ✅ pre-commit hook
+cat > .pre-commit-config.yaml <<'EOF'
+repos:
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.4.0
+    hooks:
+      - id: detect-secrets
+        args: ['--baseline', '.secrets.baseline']
+EOF
+
+Rotation
+yaml
+
+# Rotate db password هر ۹۰ روز
+- name: generate new password
+  set_fact:
+    new_db_password: "{{ lookup('password', '/dev/null length=32 chars=ascii_letters,digits') }}"
+  no_log: true
+
+- name: update in DB
+  community.mysql.mysql_user:
+    name: app
+    password: "{{ new_db_password }}"
+    state: present
+  no_log: true
+
+- name: update in Vault
+  community.hashi_vault.vault_kv2_write:
+    url: "{{ vault_addr }}"
+    path: apps/prod/db
+    data: { password: "{{ new_db_password }}" }
+  no_log: true
+
+۶️⃣ Inventory امن
+اصل: Minimal disclosure + validation
+❌ آنتی‌پترن
+ini
+
+# ❌ رمز در inventory
+[all:vars]
+ansible_password=secret
+ansible_become_pass=secret
+
+# ❌ world-readable
+-rw-r--r-- /etc/ansible/inventory/production
+
+✅ الگوی درست
+yaml
+
+# inventory/production/hosts.yml
+all:
+  vars:
+    ansible_user: deploy
+    ansible_ssh_private_key_file: /etc/ansible/keys/deploy
+    ansible_python_interpreter: /usr/bin/python3
+  children:
+    webservers:
+      hosts:
+        web01:
+          ansible_host: 10.0.0.1
+        web02:
+          ansible_host: 10.0.0.2
+    databases:
+      hosts:
+        db01:
+          ansible_host: 10.0.0.10
+
+Permissions
+bash
+
+sudo chmod 750 /etc/ansible/inventory
+sudo chmod 640 /etc/ansible/inventory/production/hosts.yml
+sudo chown -R root:ansible /etc/ansible/inventory
+
+Validation
+yaml
+
+# در ابتدای playbook
+- hosts: localhost
+  gather_facts: false
+  tasks:
+    - assert:
+        that:
+          - groups['webservers'] is defined
+          - groups['webservers'] | length > 0
+          - ansible_inventory_sources | length > 0
+        fail_msg: "Invalid inventory"
+
+    - assert:
+        that:
+          - hostvars[item]['ansible_host'] is defined
+        fail_msg: "Missing ansible_host for {{ item }}"
+      loop: "{{ groups['all'] }}"
+
+Dynamic inventory امن
+yaml
+
+# ❌ نه
+plugin: amazon.aws.aws_ec2
+aws_access_key_id: AKIA...
+aws_secret_access_key: ...
+
+# ✅ استفاده از IAM role (روی EC2)
+plugin: amazon.aws.aws_ec2
+regions: [us-east-1]
+filters:
+  tag:Environment: production
+  instance-state-name: running
+
+# ✅ یا از profile
+plugin: amazon.aws.aws_ec2
+aws_profile: production
+
+Cache امن
+bash
+
+sudo chmod 700 /var/cache/ansible
+sudo chown ansible:ansible /var/cache/ansible
+
+۷️⃣ امنیت Playbook و Task
+اصل: Explicit, Idempotent, Validated, Minimal
+۷.۱ command vs shell vs ماژول
+yaml
+
+# ❌ shell همه چیز → injection
+- shell: "useradd {{ username }}"
+
+# ✅ ماژول
+- user:
+    name: "{{ username }}"
+    state: present
+
+# ❌ shell با pipe
+- shell: "ps aux | grep nginx"
+
+# ✅
+- shell: "pgrep nginx"
+  register: result
+  changed_when: false
+  failed_when: result.rc not in [0, 1]
+
+# اگر command لازم
+- command:
+    argv:
+      - /usr/bin/systemctl
+      - restart
+      - nginx
+  # argv → no shell interpretation
+
+قانون: command (نه shell) و argv (نه string) — از shell injection جلوگیری می‌کند.
+۷.۲ Validate در همه config
+yaml
+
+- template:
+    src: nginx.conf.j2
+    dest: /etc/nginx/nginx.conf
+    validate: 'nginx -t -c %s'
+  notify: reload nginx
+
+- copy:
+    src: sshd_config
+    dest: /etc/ssh/sshd_config
+    validate: 'sshd -t -f %s'
+  notify: restart sshd
+
+- copy:
+    content: "{{ sudoers_content }}"
+    dest: /etc/sudoers.d/90-app
+    mode: '0440'
+    validate: 'visudo -cf %s'
+
+بدون validate: فایل خراب مستقر می‌شود → سرویس نمی‌آید.
+۷.۳ Idempotency
+yaml
+
+# ❌ non-idempotent
+- command: /usr/local/bin/setup.sh
+
+# ✅ idempotent
+- command: /usr/local/bin/setup.sh
+  args:
+    creates: /opt/app/.setup_done
+
+# ❌ always changed
+- lineinfile:
+    path: /etc/config
+    line: "key=value"
+
+# ✅ idempotent
+- lineinfile:
+    path: /etc/config
+    regexp: '^key='
+    line: "key=value"
+
+# ❌ misleading
+- command: systemctl restart nginx
+  changed_when: false  # ← دروغ!
+
+# ✅
+- systemd:
+    name: nginx
+    state: restarted
+
+تست idempotency:
+bash
+
+ansible-playbook site.yml
+ansible-playbook site.yml | grep -E "changed=[1-9]"
+# باید changed=0 در بار دوم باشد
+
+۷.۴ Loop safety
+yaml
+
+# ❌ leak secret در loop label
+- debug:
+    var: item
+  loop: "{{ users }}"        # شامل password
+
+# ✅
+- debug:
+    var: item.name
+  loop: "{{ users }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+۷.۵ Preflight assertions
+yaml
+
+- name: preflight checks
+  hosts: all
+  gather_facts: true
+  tasks:
+    - assert:
+        that:
+          - ansible_os_family in ['Debian', 'RedHat']
+          - ansible_memtotal_mb >= 4096
+          - ansible_distribution_major_version | int >= 20
+          - ansible_python_version is version('3.9', '>=')
+        fail_msg: "Preflight failed on {{ inventory_hostname }}"
+
+    - assert:
+        that:
+          - item.size_available / item.size_total > 0.2
+        fail_msg: "Low disk on {{ item.mount }}"
+      loop: "{{ ansible_mounts | selectattr('mount', 'in', ['/', '/var']) | list }}"
+
+۷.۶ Rolling update — هرگز big bang
+yaml
+
+- hosts: webservers
+  serial: [1, 5, "25%"]              # canary → small → large
+  max_fail_percentage: 10             # auto-abort
+  any_errors_fatal: false
+  strategy: linear
+
+  pre_tasks:
+    - name: drain from LB
+      uri:
+        url: "http://{{ lb_host }}/api/drain/{{ inventory_hostname }}"
+      delegate_to: localhost
+      run_once: false
+
+  tasks:
+    - name: deploy
+      # ...
+
+    - name: health check
+      uri:
+        url: "http://{{ inventory_hostname }}/health"
+        status_code: 200
+      register: h
+      until: h.status == 200
+      retries: 30
+      delay: 3
+      changed_when: false
+
+  post_tasks:
+    - name: enable in LB
+      uri:
+        url: "http://{{ lb_host }}/api/enable/{{ inventory_hostname }}"
+      delegate_to: localhost
+
+۷.۷ no_log vs debug
+yaml
+
+# ❌ leak
+- debug:
+    var: result
+
+# ✅
+- debug:
+    var: result.msg
+
+- debug:
+    msg: "{{ result.stdout | regex_replace('password=[^ ]+', 'password=***') }}"
+
+۷.۸ Tag strategy
+yaml
+
+- name: deploy
+  apt: name=nginx state=present
+  tags: [packages, deploy]
+
+- name: config
+  template: src=nginx.j2 dest=/etc/nginx/nginx.conf
+  tags: [config, deploy]
+  notify: reload
+
+- name: never run tags in prod accidentally
+  shell: /usr/local/bin/test.sh
+  tags: [never, test]
+
+bash
+
+# prod: فقط deploy و config
+ansible-playbook site.yml --tags "deploy,config" --skip-tags "test"
+
+۷.۹ run_once + delegate_to برای عملیات مشترک
+yaml
+
+# ❌ migration روی هر هاست اجرا می‌شود
+- command: /app/migrate
+
+# ✅
+- command: /app/migrate
+  run_once: true
+  delegate_to: "{{ groups['db_primary'][0] }}"
+  args:
+    creates: /var/lib/app/.migrated-{{ app_version }}
+
+۷.۱۰ block/rescue/always
+yaml
+
+- block:
+    - name: install
+      apt: name=nginx state=present
+
+    - name: config
+      template: src=nginx.j2 dest=/etc/nginx/nginx.conf
+      notify: reload
+
+    - name: health
+      uri: url=http://localhost/health
+      retries: 10
+      delay: 3
+
+  rescue:
+    - name: rollback packages
+      apt: name=nginx state=absent
+
+    - name: alert
+      slack:
+        msg: "Deploy failed on {{ inventory_hostname }}: {{ ansible_failed_result.msg }}"
+      delegate_to: localhost
+
+    - name: fail play
+      fail:
+        msg: "Deploy aborted"
+
+  always:
+    - name: cleanup
+      file:
+        path: /tmp/deploy.lock
+        state: absent
+
+۷.۱۱ --diff در محیط حساس
+bash
+
+# ❌ اجرا با debug
+ansible-playbook site.yml -vvv
+# → ممکن است secret در output باشد
+
+# ✅
+ansible-playbook site.yml --check --diff 2>&1 | \
+  grep -v -E '(password|token|secret|key)' | \
+  tee /tmp/plan.log
+
+۷.۱۲ Sensitive file paths
+yaml
+
+- name: deploy SSH key
+  copy:
+    content: "{{ vault_ssh_private_key }}"
+    dest: /root/.ssh/deploy_key
+    mode: '0600'
+    owner: root
+    group: root
+  no_log: true
+
+- name: deploy app config
+  copy:
+    src: config.yml
+    dest: /opt/app/config.yml
+    mode: '0640'
+    owner: app
+    group: app
+
+# فایل temp Ansible → هرگز world-readable
+- assert:
+    that:
+      - ansible_env.TMPDIR is not defined or '/tmp' not in ansible_env.TMPDIR
+
+۸️⃣ Collections / Roles / Plugins
+اصل: Trusted source + pinned version + signed
+❌ آنتی‌پترن
+yaml
+
+# requirements.yml - ❌
+collections:
+  - community.general    # ← unversioned، هر بار تغییر می‌کند
+  - name: https://random-github-user/evil-collection/archive/master.tar.gz
+
+ini
+
+# ansible.cfg - ❌
+collections_path = ~/collections
+roles_path = /tmp/roles
+[galaxy]
+ignore_certs = True
+
+✅ الگوی درست
+yaml
+
+# requirements.yml
+collections:
+  - name: community.general
+    version: ">=9.0.0,<10.0.0"
+    source: https://automation-hub.internal/api/galaxy/
+  - name: amazon.aws
+    version: "==6.5.0"
+    source: https://automation-hub.internal/api/galaxy/
+  - name: kubernetes.core
+    version: "==3.0.2"
+
+roles:
+  - name: geerlingguy.nginx
+    version: 3.1.4
+    source: https://automation-hub.internal/api/galaxy/
+
+Verify signatures
+bash
+
+# GPG verification
+ansible-galaxy collection verify community.general \
+  --keyring ~/.gnupg/pubring.kbx
+
+# در CI
+ansible-galaxy collection install -r requirements.yml --force
+ansible-galaxy collection verify --offline community.general
+
+Vendoring — قفل کردن
+bash
+
+# در git
+collections/
+├── ansible_collections/
+│   ├── community/
+│   │   └── general/
+│   └── amazon/
+│       └── aws/
+└── requirements.lock.yml
+
+bash
+
+# نصب و قفل
+ansible-galaxy collection install -r requirements.yml -p ./collections/
+ansible-galaxy collection list --format json > collections.lock.json
+git add collections/ collections.lock.json
+
+Plugin security
+ini
+
+# ansible.cfg - ✅ مسیرهای امن
+library            = /etc/ansible/library
+action_plugins     = /etc/ansible/plugins/action
+callback_plugins   = /etc/ansible/plugins/callback
+connection_plugins = /etc/ansible/plugins/connection
+filter_plugins     = /etc/ansible/plugins/filter
+lookup_plugins     = /etc/ansible/plugins/lookup
+inventory_plugins  = /etc/ansible/plugins/inventory
+
+⚠️ Plugin = کد Python اجرایی = RCE اگر attacker control. هرگز:
+
+    ~/plugins در HOME کاربر
+
+    /tmp/plugins
+
+    world-writable paths
+
+Review checklist برای collectionها
+bash
+
+# قبل از استفاده از collection جدید
+ansible-galaxy collection install <new-collection> -p /tmp/review/
+
+# بررسی کد
+grep -rE '(os\.system|subprocess|eval|exec)' /tmp/review/
+grep -rE '(requests\.|urllib|http)' /tmp/review/  # network calls?
+grep -rE '(curl|wget)' /tmp/review/               # shell out?
+
+# بررسی permission
+find /tmp/review/ -type f -perm /o+w
+
+۹️⃣ Network Isolation
+اصل: Defense in depth
+Bastion / Jump Host
+yaml
+
+# inventory
+all:
+  vars:
+    ansible_ssh_common_args: >-
+      -o ProxyJump=bastion.internal
+      -o StrictHostKeyChecking=yes
+      -o UserKnownHostsFile=/etc/ssh/ssh_known_hosts
+
+Network segmentation
+text
+
+┌─────────────────┐
+│ Control Node    │  فقط به bastion دسترسی
+└────────┬────────┘
+         │
+┌────────▼────────┐
+│ Bastion         │  دو interface (public/private)
+└────────┬────────┘
+         │
+┌────────▼────────┐
+│ App/DB Servers  │  فقط از bastion دسترسی SSH
+└─────────────────┘
+
+Tailscale / WireGuard برای کنترل نود
+bash
+
+# به‌جای SSH از اینترنت
+sudo tailscale up --advertise-tags=tag:ansible-control
+
+# inventory با tailscale IP
+all:
+  hosts:
+    web01:
+      ansible_host: 100.64.0.1
+
+Ansible Connection proxy
+ini
+
+# ansible.cfg
+[ssh_connection]
+ssh_args = -o ProxyCommand="ssh -W %h:%p bastion.internal" -o StrictHostKeyChecking=yes
+
+Isolated Ansible Execution Environment
+yaml
+
+# execution-environment.yml
+version: 3
+images:
+  base_image:
+    name: quay.io/ansible/creator-ee:latest
+dependencies:
+  galaxy:
+    collections:
+      - community.general==9.0.0
+  python:
+    - boto3==1.34.0
+
+bash
+
+# اجرا در container ایزوله
+podman run --rm -it \
+  --network=internal-only \
+  --read-only \
+  --security-opt=no-new-privileges \
+  -v /etc/ansible:/ansible:ro \
+  -v ~/.ssh:/root/.ssh:ro \
+  my-ee:1.0 \
+  ansible-playbook /ansible/site.yml
+
+۱۰️⃣ Logging و Auditing
+اصل: همه چیز لاگ شود، هیچ secret لاگ نشود
+ansible.cfg
+ini
+
+[defaults]
+log_path = /var/log/ansible.log
+stdout_callback = yaml
+callbacks_enabled = profile_tasks, timer, junit, log_plays
+
+[logging]
+log_path = /var/log/ansible.log
+log_level = INFO
+
+Log rotation
+bash
+
+# /etc/logrotate.d/ansible
+/var/log/ansible.log {
+    daily
+    rotate 90
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0640 ansible adm
+    sharedscripts
+    postrotate
+        systemctl reload rsyslog > /dev/null 2>&1 || true
+    endscript
+}
+
+Log permissions
+bash
+
+sudo chmod 640 /var/log/ansible.log
+sudo chown ansible:adm /var/log/ansible.log
+
+SIEM forwarding
+bash
+
+# /etc/rsyslog.d/50-ansible.conf
+module(load="imfile")
+input(type="imfile"
+      File="/var/log/ansible.log"
+      Tag="ansible"
+      Severity="info"
+      Facility="local6")
+local6.* @@siem.internal:514
+
+Auditd rules
+bash
+
+# /etc/audit/rules.d/ansible.rules
+-w /etc/ansible -p wa -k ansible_config
+-w /etc/ansible/.vault_pass -p rwa -k vault_read
+-w /opt/ansible-venv -p wa -k ansible_bin
+-w /var/log/ansible.log -p wa -k ansible_log
+-w /etc/sudoers.d -p wa -k sudoers
+-w /home/ansible/.ssh -p wa -k ssh_keys
+-a always,exit -F arch=b64 -S execve -F auid=1001 -k ansible_exec
+
+Detection rules (SIEM)
+yaml
+
+# Sigma-style rules
+- name: Sensitive data in ansible log
+  pattern: 'password|token|secret|api_key|private_key'
+  action: alert
+
+- name: Unexpected sudo by ansible
+  pattern: 'ansible.*sudo.*(rm|dd|mkfs|passwd)'
+  action: alert
+
+- name: Vault read outside window
+  pattern: 'vault_read'
+  time_exclude: [business_hours]
+  action: alert
+
+- name: Shell task without no_log
+  pattern: 'shell.*password'
+  action: block
+
+Ansible callback برای audit
+python
+
+# /etc/ansible/callback_plugins/audit_logger.py
+from ansible.plugins.callback import CallbackBase
+import json, logging, os
+
+class CallbackModule(CallbackBase):
+    CALLBACK_VERSION = 2.0
+    CALLBACK_TYPE = 'notification'
+    CALLBACK_NAME = 'audit_logger'
+    CALLBACK_NEEDS_WHITELIST = True
+
+    def __init__(self):
+        super().__init__()
+        self.logger = logging.getLogger('ansible_audit')
+        handler = logging.FileHandler('/var/log/ansible-audit.json')
+        handler.setFormatter(logging.Formatter('%(message)s'))
+        self.logger.addHandler(handler)
+        self.logger.setLevel(logging.INFO)
+
+    def _log(self, event, result):
+        entry = {
+            'event': event,
+            'task': result._task.get_name() if result._task else None,
+            'host': result._host.get_name() if result._host else None,
+            'result': {
+                'changed': getattr(result, '_result', {}).get('changed'),
+                'failed': getattr(result, '_result', {}).get('failed'),
+            },
+            'user': os.environ.get('USER', 'unknown'),
+            'playbook': self._playbook,
+        }
+        self.logger.info(json.dumps(entry))
+
+    def v2_playbook_on_start(self, playbook):
+        self._playbook = playbook._file_name
+
+    def v2_runner_on_ok(self, result):
+        self._log('task_ok', result)
+
+    def v2_runner_on_failed(self, result, ignore_errors=False):
+        self._log('task_failed', result)
+
+    def v2_runner_on_unreachable(self, result):
+        self._log('unreachable', result)
+
+۱۱️⃣ CI/CD Security
+اصل: Reproducible + Verified + Isolated
+❌ آنتی‌پترن
+yaml
+
+# ❌ pipeline با کلید prod
+deploy:
+  script:
+    - ansible-playbook -i inventory/prod site.yml
+  # با SSH_PRIVATE_KEY در CI vars → همه developers می‌بینند
+
+✅ الگوی درست — HashiCorp Vault + OIDC
+yaml
+
+# .gitlab-ci.yml
+stages:
+  - lint
+  - test
+  - deploy-staging
+  - deploy-prod
+
+variables:
+  ANSIBLE_FORKS: "10"
+  ANSIBLE_HOST_KEY_CHECKING: "True"
+  ANSIBLE_STDOUT_CALLBACK: yaml
+
+lint:
+  stage: lint
+  image: python:3.11
+  before_script:
+    - pip install 'ansible-core==2.17.6' ansible-lint yamllint
+  script:
+    - yamllint .
+    - ansible-lint --profile production
+    - ansible-playbook --syntax-check site.yml
+    - ansible-inventory -i inventory/staging --graph
+
+test:
+  stage: test
+  script:
+    - ansible-playbook -i inventory/staging site.yml --check --diff
+    - ansible-playbook -i inventory/staging molecule-test.yml
+
+deploy-staging:
+  stage: deploy-staging
+  script:
+    # OIDC به Vault → dynamic SSH key
+    - export VAULT_TOKEN=$(vault write -field=token auth/jwt/login role=gitlab jwt=$CI_JOB_JWT)
+    - export ANSIBLE_VAULT_PASSWORD_FILE=<(vault kv get -field=password secret/ansible/vault-stg)
+    - ssh-add <(vault kv get -field=key secret/ansible/ssh-stg)
+    - ansible-playbook -i inventory/staging site.yml --vault-id stg@$ANSIBLE_VAULT_PASSWORD_FILE
+
+deploy-prod:
+  stage: deploy-prod
+  when: manual
+  environment:
+    name: production
+  script:
+    - export VAULT_TOKEN=$(vault write -field=token auth/jwt/login role=gitlab-prod jwt=$CI_JOB_JWT)
+    - export ANSIBLE_VAULT_PASSWORD_FILE=<(vault kv get -field=password secret/ansible/vault-prod)
+    - ansible-playbook -i inventory/production site.yml \
+        --vault-id prod@$ANSIBLE_VAULT_PASSWORD_FILE \
+        --limit "${DEPLOY_HOSTS:-all}"
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+      when: manual
+
+Pre-commit hooks
+yaml
+
+# .pre-commit-config.yaml
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+      - id: check-yaml
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: detect-private-key
+      - id: check-added-large-files
+
+  - repo: https://github.com/ansible/ansible-lint
+    rev: v24.2.0
+    hooks:
+      - id: ansible-lint
+
+  - repo: https://github.com/adrienverge/yamllint
+    rev: v1.33.0
+    hooks:
+      - id: yamllint
+        args: [-c=.yamllint]
+
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.4.0
+    hooks:
+      - id: detect-secrets
+        args: ['--baseline', '.secrets.baseline']
+
+Secrets scanning
+bash
+
+# در CI
+detect-secrets scan --baseline .secrets.baseline
+trufflehog filesystem . --only-verified
+gitleaks detect --source . --verbose
+
+SBOM و pin
+bash
+
+# lock file
+pip freeze > requirements.lock.txt
+sha256sum requirements.lock.txt > requirements.lock.txt.sha256
+
+# در CI، نصب دقیق
+pip install -r requirements.lock.txt --require-hashes
+
+sign commits
+bash
+
+git config --global user.signingkey <GPG_KEY>
+git config --global commit.gpgsign true
+git tag -s v1.2.3 -m "Release v1.2.3"
+git verify-tag v1.2.3
+
+۱۲️⃣ Filesystem Permissions
+اصل: Restricted + Audit-able
+ساختار پیشنهادی
+text
+
+/etc/ansible/                        root:ansible  750
+├── ansible.cfg                      root:ansible  640
+├── inventory/                       root:ansible  750
+│   └── production/                  root:ansible  750
+│       ├── hosts.yml                root:ansible  640
+│       ├── group_vars/              root:ansible  750
+│       │   └── vault.yml            root:ansible  600
+│       └── host_vars/               root:ansible  750
+├── roles/                           root:ansible  750
+├── collections/                     root:ansible  750
+├── plugins/                         root:ansible  750
+└── .vault_pass                      ansible:ansible 600
+
+/var/log/ansible.log                 ansible:adm   640
+/var/lib/ansible/                    ansible:ansible 750
+├── cp/                              ansible:ansible 700
+├── pc/                              ansible:ansible 700
+└── retry/                           ansible:ansible 700
+
+/var/cache/ansible/                  ansible:ansible 700
+/opt/ansible-venv/                   ansible:ansible 750
+└── bin/                             ansible:ansible 750
+
+اسکریپت hardening
+bash
+
+#!/bin/bash
+set -euo pipefail
+
+# Ansible directory
+sudo chown -R root:ansible /etc/ansible
+sudo find /etc/ansible -type d -exec chmod 750 {} \;
+sudo find /etc/ansible -type f -exec chmod 640 {} \;
+sudo find /etc/ansible -name "*.yml" -path "*/vault/*" -exec chmod 600 {} \;
+sudo find /etc/ansible -name ".vault_pass*" -exec chmod 600 {} \;
+sudo find /etc/ansible -name "*.key" -exec chmod 600 {} \;
+sudo find /etc/ansible -name "*.pem" -exec chmod 600 {} \;
+
+# Logs
+sudo chown ansible:adm /var/log/ansible.log
+sudo chmod 640 /var/log/ansible.log
+
+# Cache/state dirs
+for dir in /var/lib/ansible /var/cache/ansible; do
+    sudo mkdir -p "$dir"
+    sudo chown -R ansible:ansible "$dir"
+    sudo chmod 750 "$dir"
+done
+
+sudo chmod 700 /var/lib/ansible/cp /var/lib/ansible/pc
+
+# Verify no world-writable
+if find /etc/ansible -perm /o+w -type f | grep -q .; then
+    echo "ERROR: world-writable files found"
+    exit 1
+fi
+
+echo "Hardening complete"
+
+SELinux context
+bash
+
+# اگر SELinux enforcing
+sudo semanage fcontext -a -t etc_t "/etc/ansible(/.*)?"
+sudo semanage fcontext -a -t bin_t "/opt/ansible-venv/bin(/.*)?"
+sudo restorecon -Rv /etc/ansible /opt/ansible-venv
+
+# بررسی
+ls -laZ /etc/ansible/
+matchpathcon -V /etc/ansible/ansible.cfg
+
+temp file hardening
+yaml
+
+# ansible.cfg
+[defaults]
+allow_world_readable_tmpfiles = False
+remote_tmp = ~/.ansible/tmp
+local_tmp = ~/.ansible/tmp
+
+# remote_tmp در playbook
+- hosts: all
+  vars:
+    ansible_remote_tmp: /tmp/.ansible-{{ ansible_user }}/tmp
+
+bash
+
+# اطمینان از temp امن
+ls -la ~/.ansible/tmp/
+# drwx------ (700)
+
+۱۳️⃣ Fact Management
+اصل: Minimal facts + cache security
+gather_subset حداقلی
+yaml
+
+# ansible.cfg
+[defaults]
+gathering = smart
+gather_subset = min,network,virtual
+# not all → faster + fewer attack surfaces
+
+yaml
+
+# یا در play
+- hosts: all
+  gather_subset: ['!all', '!hardware', '!facter', '!ohai', 'min']
+
+Fact cache امن
+bash
+
+sudo mkdir -p /var/cache/ansible/facts
+sudo chmod 700 /var/cache/ansible
+sudo chown -R ansible:ansible /var/cache/ansible
+
+ini
+
+[defaults]
+fact_caching = jsonfile
+fact_caching_connection = /var/cache/ansible/facts
+fact_caching_timeout = 7200
+fact_caching_prefix = ansible_facts
+
+Custom facts
+yaml
+
+# /etc/ansible/facts.d/myapp.fact (روی هدف)
+{
+    "version": "1.2.3",
+    "env": "production",
+    "region": "ir"
+}
+
+yaml
+
+# دسترسی
+- debug:
+    msg: "App version: {{ ansible_facts['local']['myapp']['version'] }}"
+
+⚠️ هشدار: /etc/ansible/facts.d/ روی هدف است. اگر کاربر غیرروت بتواند بنویسد → fact injection.
+yaml
+
+- name: secure local facts
+  file:
+    path: /etc/ansible/facts.d
+    state: directory
+    mode: '0755'
+    owner: root
+    group: root
+
+- name: deploy custom fact
+  copy:
+    content: "{{ myapp_fact | to_nice_json }}"
+    dest: /etc/ansible/facts.d/myapp.fact
+    mode: '0644'
+    owner: root
+
+Fact injection protection
+yaml
+
+# ❌ اگر group_vars/all.yml روی git attacker-control
+ansible_distribution: "custom"  # ← overwrite fact
+
+# ✅
+[defaults]
+inject_facts_as_vars = False   # فقط ansible_facts['x'] معتبر
+
+۱۴️⃣ Error Handling و Resilience
+اصل: Fail safe, not fail silent
+❌ Anti-patterns
+yaml
+
+# ❌ ignore_errors روی همه چیز
+- command: /usr/local/bin/critical
+  ignore_errors: yes
+
+# ❌ changed_when: false برای پنهان‌سازی
+- command: systemctl restart nginx
+  changed_when: false
+
+# ❌ بدون retry برای network
+- uri: url=https://api.example.com
+
+✅ الگوهای درست
+yaml
+
+# retry با until
+- name: wait for service
+  uri:
+    url: "http://localhost:8080/health"
+  register: h
+  until: h.status == 200
+  retries: 30
+  delay: 3
+  failed_when: h.status not in [200, 503]  # 503 = در حال راه‌اندازی
+
+# block/rescue برای rollback
+- block:
+    - name: deploy
+      copy: src=app dest=/opt/app/app
+      notify: restart app
+    - meta: flush_handlers
+    - name: health
+      uri: url=http://localhost/health
+      retries: 10
+      delay: 3
+  rescue:
+    - name: restore previous version
+      copy: src=app.old dest=/opt/app/app
+    - systemd: name=app state=restarted
+    - fail: msg="Deployment failed, rolled back"
+
+# any_errors_fatal در cluster
+- hosts: cluster
+  any_errors_fatal: true
+  max_fail_percentage: 0    # یک fail = abort
+
+# meta end_play برای abort تمیز
+- meta: end_play
+  when: preflight_failed
+
+Failed handlers
+yaml
+
+# handler fail → باید fail کند play
+handlers:
+  - name: restart app
+    systemd:
+      name: app
+      state: restarted
+    # اگر fail → play fail (پیش‌فرض)
+
+# force-handlers
+# ansible-playbook site.yml --force-handlers
+
+--limit @retry
+bash
+
+# اجرای اول
+ansible-playbook site.yml
+# بعد از fail → site.retry ساخته می‌شود
+
+# اجرای دوم فقط روی failed
+ansible-playbook site.yml --limit @site.retry
+
+Sensitive failure logging
+yaml
+
+# ❌ failure message شامل secret
+- name: deploy
+  command: "curl -H 'Authorization: {{ token }}' {{ url }}"
+
+# ✅
+- name: deploy
+  uri:
+    url: "{{ url }}"
+    headers:
+      Authorization: "Bearer {{ token }}"
+  register: result
+  failed_when: result.status not in [200, 201]
+  # error message فقط status است، نه token
+
+۱۵️⃣ Testing و Validation
+اصل: Test early, test often, test prod-like
+Lint مرحله‌ای
+yaml
+
+# .ansible-lint
+profile: production
+exclude_paths:
+  - .cache/
+  - .git/
+  - vendor/
+
+enable_list:
+  - no-changed-when
+  - no-handler
+  - no-tabs
+
+skip_list:
+  - yaml[line-length]
+  - no-handler
+  - command-instead-of-module
+
+warn_list:
+  - experimental
+  - jinja[spacing]
+  - no-same-owner
+
+# فقط برای تولید
+mock_modules:
+  - long_running_module
+  - api_module
+
+bash
+
+ansible-lint --profile production
+ansible-lint --strict
+ansible-lint --nocolor --format sarif > ansible-lint.sarif
+
+Syntax check
+bash
+
+ansible-playbook site.yml --syntax-check
+yamllint -c .yamllint .
+
+Molecule testing
+yaml
+
+# molecule/default/molecule.yml
+dependency:
+  name: galaxy
+driver:
+  name: docker
+platforms:
+  - name: ubuntu-22
+    image: ubuntu:22.04
+    pre_build_image: true
+  - name: rocky-9
+    image: rockylinux:9
+    pre_build_image: true
+provisioner:
+  name: ansible
+  config_options:
+    defaults:
+      stdout_callback: yaml
+verifier:
+  name: ansible
+
+bash
+
+molecule test       # lint → create → converge → idempotence → verify → destroy
+molecule converge   # فقط اجرا
+molecule idempotence # دو بار اجرا
+molecule verify     # test assertions
+
+Check mode
+bash
+
+# ❌ فقط check
+ansible-playbook site.yml --check
+
+# ✅ check + diff
+ansible-playbook site.yml --check --diff
+
+# ✅ در staging واقعی
+ansible-playbook -i inventory/staging site.yml --check --diff
+
+Idempotency test
+bash
+
+#!/bin/bash
+# idempotency.sh
+set -e
+ansible-playbook -i inventory/staging site.yml
+CHANGED=$(ansible-playbook -i inventory/staging site.yml | grep -E "changed=[1-9]" | wc -l)
+if [ "$CHANGED" -gt 0 ]; then
+    echo "FAIL: not idempotent"
+    exit 1
+fi
+echo "PASS: idempotent"
+
+Integration test
+yaml
+
+# tests/integration.yml
+- hosts: all
+  tasks:
+    - name: verify nginx running
+      systemd:
+        name: nginx
+      register: s
+      failed_when: s.status.ActiveState != 'active'
+
+    - name: verify endpoint
+      uri:
+        url: "http://localhost/health"
+        status_code: 200
+
+    - name: verify TLS
+      uri:
+        url: "https://localhost/health"
+        validate_certs: yes
+        status_code: 200
+
+    - name: verify config
+      command: nginx -t
+      changed_when: false
+
+Security tests
+bash
+
+# در CI
+- name: Check SSH hardening
+  shell: sshd -T | grep -E "^(permitrootlogin|passwordauthentication)"
+  register: sshd
+  changed_when: false
+  failed_when: >
+    'permitrootlogin yes' in sshd.stdout or
+    'passwordauthentication yes' in sshd.stdout
+
+Regression test
+bash
+
+# تست failure scenario
+- name: rollback test
+  script: |
+    kill -9 $(pgrep app)
+    sleep 30
+    curl -f http://localhost/health || exit 1
+  # باید پس از 30 ثانیه health برگردد (systemd restart)
+
+Performance test
+bash
+
+# اندازه‌گیری زمان playbook
+ANSIBLE_CALLBACKS_ENABLED=profile_tasks ansible-playbook site.yml
+
+# در CI، fail اگر بیش از threshold
+if [ "$elapsed" -gt 1800 ]; then
+    echo "Playbook too slow"
+    exit 1
+fi
+
+۱۶️⃣ Change Management
+اصل: Review + Approval + Rollback plan
+Git workflow
+text
+
+main (protected)
+  ↑
+  └── PR with review
+        ↑
+        └── develop branch
+              ↑
+              └── feature branch
+
+PR requirements
+yaml
+
+# .github/workflows/ansible.yml
+name: Ansible CI
+on: [pull_request]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install 'ansible-core==2.17.6' ansible-lint yamllint
+      - run: yamllint .
+      - run: ansible-lint --profile production
+      - run: ansible-playbook --syntax-check site.yml
+
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Yelp/detect-secrets-action@v1
+      - uses: gitleaks/gitleaks-action@v2
+
+  molecule:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: pip install molecule molecule-docker ansible-core
+      - run: molecule test
+
+Branch protection
+text
+
+✅ Require PR review (2 approvers)
+✅ Require CI pass
+✅ Require signed commits
+✅ Require linear history
+✅ Restrict push (main/develop)
+✅ Require conversation resolution
+
+Commit message convention
+text
+
+feat: add nginx reverse proxy
+fix: correct ssh port in inventory
+security: enable host_key_checking
+BREAKING: change ansible_user default
+
+Rollback plan در PR
+markdown
+
+## Rollback plan
+1. `git revert <SHA>`
+2. `ansible-playbook -i inventory/prod rollback.yml --limit @affected`
+3. Verify health checks
+4. Monitor 30 min
+
+Change window
+yaml
+
+# .gitlab-ci.yml
+deploy-prod:
+  script: ...
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+      when: manual
+  environment:
+    name: production
+
+فقط در پنجره مجاز (مثلاً پنجشنبه ۲-۶ صبح). Automation:
+bash
+
+#!/bin/bash
+# check-window.sh
+HOUR=$(date +%H)
+DAY=$(date +%u)
+if [[ "$DAY" -ne 4 ]] || [[ "$HOUR" -lt 2 ]] || [[ "$HOUR" -gt 6 ]]; then
+    echo "Outside change window"
+    exit 1
+fi
+
+۱۷️⃣ Monitoring و Alerting
+اصل: Observable + Alert-able
+متریک‌های کلیدی
+yaml
+
+# ansible.cfg callback
+callbacks_enabled = profile_tasks, timer, junit, statsd
+
+[callback_statsd]
+statsd_host = statsd.internal
+statsd_port = 8125
+
+Prometheus exporter
+python
+
+# callback_plugins/prometheus.py
+from ansible.plugins.callback import CallbackBase
+from prometheus_client import Counter, Histogram
+import time
+
+TASK_COUNT = Counter('ansible_tasks_total', 'Tasks', ['status'])
+TASK_DURATION = Histogram('ansible_task_duration_seconds', 'Duration', ['task'])
+
+class CallbackModule(CallbackBase):
+    CALLBACK_NAME = 'prometheus'
+    CALLBACK_NEEDS_WHITELIST = True
+
+    def v2_runner_on_ok(self, result):
+        TASK_COUNT.labels(status='ok').inc()
+
+    def v2_runner_on_failed(self, result, ignore_errors=False):
+        TASK_COUNT.labels(status='failed').inc()
+
+    def v2_runner_on_unreachable(self, result):
+        TASK_COUNT.labels(status='unreachable').inc()
+
+Alert rules
+yaml
+
+# prometheus/rules/ansible.yml
+groups:
+  - name: ansible
+    rules:
+      - alert: AnsibleHighFailureRate
+        expr: rate(ansible_tasks_total{status="failed"}[5m]) > 0.05
+        for: 5m
+        annotations:
+          summary: "High task failure rate"
+
+      - alert: AnsibleUnreachable
+        expr: increase(ansible_tasks_total{status="unreachable"}[10m]) > 3
+        annotations:
+          summary: "Multiple unreachable hosts"
+
+      - alert: AnsiblePlaybookTooLong
+        expr: ansible_playbook_duration_seconds > 3600
+        annotations:
+          summary: "Playbook running > 1h"
+
+Dashboard Grafana
+text
+
+┌─────────────────────────────────────┐
+│ Ansible Overview                    │
+├─────────────────────────────────────┤
+│ Tasks/sec by status                 │
+│ ▓▓▓▓▓▓ ok   ▓ fail   ▓ unreachable  │
+│                                     │
+│ Top slow tasks (profile_tasks)      │
+│ 1. Install packages       45s       │
+│ 2. Template nginx.conf    12s       │
+│                                     │
+│ Hosts by status                     │
+│ ✅ 48  ⚠️ 1  ❌ 1                   │
+└─────────────────────────────────────┘
+
+Log monitoring alerts
+yaml
+
+# SIEM rules
+- name: ansible_secret_in_log
+  pattern: 'password=|token=|secret=|api_key='
+  severity: critical
+  action: page_oncall
+
+- name: ansible_privilege_escalation
+  pattern: 'sudo.*(rm|passwd|useradd)'
+  severity: high
+  action: alert
+
+- name: ansible_vault_read_outside_hours
+  pattern: 'vault_read'
+  time: "outside 08:00-20:00"
+  severity: medium
+
+Health check playbook
+yaml
+
+# healthcheck.yml (اجرا هر ۱۵ دقیقه با cron)
+- hosts: all
+  gather_facts: true
+  tasks:
+    - ping:
+
+    - name: disk usage
+      assert:
+        that:
+          - item.size_available / item.size_total > 0.1
+      loop: "{{ ansible_mounts }}"
+
+    - name: memory usage
+      assert:
+        that:
+          - ansible_memfree_mb / ansible_memtotal_mb > 0.05
+
+    - name: critical services
+      systemd:
+        name: "{{ item }}"
+      loop: [ssh, cron, nginx, postgresql]
+      register: svc
+      failed_when: svc.status.ActiveState != 'active'
+
+۱۸️⃣ Incident Response
+اصل: Detect → Isolate → Recover → Learn
+Playbook برای emergency
+yaml
+
+# emergency/isolate.yml
+- hosts: compromised
+  gather_facts: no
+  tasks:
+    - name: isolate host
+      ansible.posix.firewalld:
+        state: enabled
+        zone: drop
+        permanent: no
+        immediate: yes
+        interface: "*"
+      delegate_to: "{{ inventory_hostname }}"
+
+    - name: notify security
+      community.general.slack:
+        token: "{{ vault_slack }}"
+        channel: "#security-incidents"
+        msg: "Host {{ inventory_hostname }} isolated by {{ ansible_user_id }} at {{ ansible_date_time.iso8601 }}"
+      delegate_to: localhost
+
+Playbook forensic
+yaml
+
+# forensic/collect.yml
+- hosts: suspicious
+  gather_facts: yes
+  tasks:
+    - name: collect processes
+      command: ps auxwwf
+      register: ps
+
+    - name: collect network
+      command: ss -tunap
+      register: net
+
+    - name: collect connections
+      command: lsof -i
+      register: lsof
+
+    - name: collect logins
+      command: last -100
+      register: logins
+
+    - name: collect auth logs
+      slurp:
+        src: /var/log/auth.log
+      register: auth
+
+    - name: save evidence locally
+      copy:
+        content: |
+          === PROCESSES ===
+          {{ ps.stdout }}
+
+          === NETWORK ===
+          {{ net.stdout }}
+
+          === CONNECTIONS ===
+          {{ lsof.stdout }}
+
+          === LOGINS ===
+          {{ logins.stdout }}
+        dest: "evidence/{{ inventory_hostname }}-{{ ansible_date_time.iso8601_basic_short }}.log"
+      delegate_to: localhost
+
+Kill switch
+yaml
+
+# emergency/kill-switch.yml
+- hosts: all
+  gather_facts: no
+  tasks:
+    - name: block all connections
+      iptables:
+        chain: INPUT
+        source: "{{ item }}"
+        jump: DROP
+      loop: "{{ suspicious_ips }}"
+      become: true
+
+    - name: stop all app services
+      systemd:
+        name: "{{ item }}"
+        state: stopped
+      loop: [nginx, app, postgresql]
+
+    - name: snapshot for forensics
+      command: tar czf /root/forensic-{{ ansible_date_time.iso8601_basic_short }}.tgz \
+        /var/log /etc /home
+
+Post-mortem
+yaml
+
+# Playbook برای rotation secrets بعد از incident
+- hosts: all
+  tasks:
+    - name: rotate SSH keys
+      openssh_keypair:
+        path: /etc/ssh/ssh_host_ed25519_key
+        state: absent  # regenerate
+      notify: restart sshd
+
+    - name: rotate app secrets
+      include_tasks: rotate-secrets.yml
+      loop: "{{ all_secrets }}"
+
+۱۹️⃣ Compliance و Governance
+اصل: Automated + Documented + Auditable
+CIS Benchmark playbook
+yaml
+
+# compliance/cis-level1.yml
+- hosts: all
+  become: true
+  tasks:
+    - name: CIS 1.1.1 disable unused filesystems
+      copy:
+        content: |
+          install cramfs /bin/true
+          install freevxfs /bin/true
+          install jffs2 /bin/true
+          install hfs /bin/true
+          install hfsplus /bin/true
+        dest: /etc/modprobe.d/cis-fs.conf
+
+    - name: CIS 1.4.1 grub password
+      lineinfile:
+        path: /boot/grub2/grub.cfg
+        regexp: '^set superusers'
+        line: 'set superusers="root"'
+
+    - name: CIS 5.2.4 disable SSH root login
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?PermitRootLogin'
+        line: 'PermitRootLogin no'
+      notify: restart sshd
+
+Audit playbook
+yaml
+
+# compliance/audit.yml
+- hosts: all
+  gather_facts: yes
+  tasks:
+    - name: check SSH config
+      shell: sshd -T | grep -E '^(permitrootlogin|passwordauthentication)'
+      register: sshd
+      changed_when: false
+
+    - name: check firewall
+      command: firewall-cmd --state
+      register: fw
+      changed_when: false
+      failed_when: fw.stdout != 'running'
+
+    - name: check patches
+      command: dnf check-update
+      register: patches
+      failed_when: patches.rc not in [0, 100]
+
+    - name: report
+      copy:
+        content: "{{ compliance_report | to_nice_json }}"
+        dest: "/var/log/compliance/{{ inventory_hostname }}.json"
+      delegate_to: localhost
+
+PCI-DSS / HIPAA mapping
+yaml
+
+# compliance/controls.yml
+controls:
+  - id: "2.2.4"
+    name: "Disable unnecessary services"
+    playbook: "hardening/disable-services.yml"
+    check: "audit/check-services.yml"
+
+  - id: "8.2.1"
+    name: "Strong authentication"
+    playbook: "hardening/ssh.yml"
+    check: "audit/check-ssh.yml"
+
+  - id: "10.2.1"
+    name: "Audit logs"
+    playbook: "logging/auditd.yml"
+    check: "audit/check-auditd.yml"
+
+Segregation
+yaml
+
+# group_vars/all.yml
+compliance:
+  pci: true
+  hipaa: false
+  sox: true
+
+# در playbook
+- include_tasks: hardening/pci.yml
+  when: compliance.pci
+
+۲۰️⃣ چک‌لیست نهایی Production
+🏗️ Architecture
+
+    □
+
+    Dedicated control node (نه laptop)
+    □
+
+    Control node hardened (SSH، firewall، auditd)
+    □
+
+    user غیر‌روت (ansible)
+    □
+
+    sudoers whitelist (نه ALL)
+    □
+
+    Bastion/Jump host برای دسترسی
+    □
+
+    Network segmentation
+    □
+
+    Backup روزانه control node
+
+🔧 Config
+
+    □
+
+    /etc/ansible/ansible.cfg (نه ~/)
+    □
+
+    host_key_checking = True
+    □
+
+    allow_world_readable_tmpfiles = False
+    □
+
+    inject_facts_as_vars = False
+    □
+
+    interpreter_python = /usr/bin/python3
+    □
+
+    log_path با permission صحیح
+    □
+
+    pipelining = True + !requiretty
+    □
+
+    [galaxy] ignore_certs = False
+    □
+
+    enable_plugins = yaml, ini (نه script)
+
+🔐 Auth
+
+    □
+
+    SSH key-only (نه password)
+    □
+
+    Ed25519 (نه RSA یا DSA)
+    □
+
+    SSH CA برای host verification
+    □
+
+    known_hosts مرکزی (/etc/ssh/ssh_known_hosts)
+    □
+
+    SSH agent فقط با کلیدهای لازم
+    □
+
+    authorized_keys با key_options محدود
+    □
+
+    Become فقط در task لازم
+    □
+
+    become_user صریح (نه root همه‌جا)
+
+🔒 Secrets
+
+    □
+
+    Vault برای همه secretها
+    □
+
+    Vault password از secret manager
+    □
+
+    no_log: true روی taskهای حساس
+    □
+
+    .gitignore شامل .vault_pass*
+    □
+
+    pre-commit detect-secrets
+    □
+
+    rotation هر ۹۰ روز
+    □
+
+    vault-id چندگانه (dev/prod/staging)
+
+📁 Files
+
+    □
+
+    /etc/ansible 750 root:ansible
+    □
+
+    ansible.cfg 640 root:ansible
+    □
+
+    vault 600
+    □
+
+    SSH keys 600
+    □
+
+    log 640 ansible:adm
+    □
+
+    cp/pc 700
+    □
+
+    SELinux contexts درست
+    □
+
+    بدون world-writable
+
+🎯 Playbook
+
+    □
+
+    FQCN (ansible.builtin.*, نه copy)
+    □
+
+    validate در همه config
+    □
+
+    idempotent (test شده)
+    □
+
+    changed_when دقیق
+    □
+
+    serial + max_fail_percentage
+    □
+
+    block/rescue/always
+    □
+
+    preflight assertions
+    □
+
+    health checks
+    □
+
+    tags منظم
+    □
+
+    no_log روی حساس
+    □
+
+    loop_control.label
+    □
+
+    هیچ shell بدون دلیل
+    □
+
+    argv به‌جای string در command
+
+📦 Collections
+
+    □
+
+    requirements.yml با version pin
+    □
+
+    نصب از mirror/Automation Hub
+    □
+
+    verify signatures
+    □
+
+    collections_path امن
+    □
+
+    review قبل از افزودن collection جدید
+    □
+
+    lock file در git
+
+🧪 Testing
+
+    □
+
+    ansible-lint --profile production
+    □
+
+    yamllint
+    □
+
+    --syntax-check
+    □
+
+    --check --diff در staging
+    □
+
+    Molecule test برای role
+    □
+
+    idempotency test
+    □
+
+    integration test
+    □
+
+    performance test
+    □
+
+    security tests
+
+🚀 Deployment
+
+    □
+
+    PR review (2 approvers)
+    □
+
+    CI pass
+    □
+
+    Change window
+    □
+
+    Rollback plan
+    □
+
+    Backup قبل از تغییر
+    □
+
+    serial rolling
+    □
+
+    health check بعد
+    □
+
+    monitoring 30 دقیقه
+    □
+
+    runbook در دسترس
+
+📊 Monitoring
+
+    □
+
+    log_path به SIEM
+    □
+
+    alert روی UNREACHABLE
+    □
+
+    alert روی failure rate بالا
+    □
+
+    alert روی unexpected sudo
+    □
+
+    alert روی secret در log
+    □
+
+    dashboard Grafana
+    □
+
+    health check cron (۱۵ دقیقه)
+
+🚨 Incident Response
+
+    □
+
+    runbook برای common incidents
+    □
+
+    playbook isolate
+    □
+
+    playbook forensic
+    □
+
+    playbook kill-switch
+    □
+
+    rotation procedure
+    □
+
+    communication template
+    □
+
+    post-mortem template
+
+📋 Compliance
+
+    □
+
+    CIS benchmark map
+    □
+
+    controls automated
+    □
+
+    audit reports
+    □
+
+    evidence collection
+    □
+
+    quarterly review
+    □
+
+    documentation up-to-date
+
+🎓 ۲۰ قانون طلایی امنیتی Ansible
+
+    هرگز host_key_checking = False
+
+    هرگز allow_world_readable_tmpfiles = True
+
+    هرگز رمز در plaintext
+
+    هرگز NOPASSWD: ALL در sudoers
+
+    هرگز no_log نبودن روی secret task
+
+    هرگز ignore_errors روی critical task
+
+    هرگز changed_when: false روی تغییریافته
+
+    هرگز validate نبودن در config
+
+    هرگز secret در output یا log
+
+    هرگز remote_user = root مستقیم
+
+    همیشه --syntax-check + --check --diff
+
+    همیشه serial + max_fail_percentage
+
+    همیشه FQCN
+
+    همیشه vault-id چندگانه
+
+    همیشه requirements.yml pin شده
+
+    همیشه --check در staging قبل از prod
+
+    همیشه runbook + rollback plan
+
+    همیشه log_path + SIEM
+
+    همیشه no_log + loop_control.label
+
+    همیشه backup قبل از تغییر حساس
+
+🎯 جمع‌بندی: مدل ذهنی امن
+text
+
+        ┌──────────────────────────────┐
+        │       Security Layers         │
+        ├──────────────────────────────┤
+        │ 1. Architecture (isolation)   │
+        │ 2. Config (secure defaults)   │
+        │ 3. Auth (key-only + CA)       │
+        │ 4. Secrets (vault + manager)  │
+        │ 5. Code (validate + idempotent)│
+        │ 6. Network (bastion + segment)│
+        │ 7. Files (permissions + SELinux)│
+        │ 8. Log (SIEM + audit)         │
+        │ 9. CI/CD (review + scan)      │
+        │ 10. Monitoring (alert + metric)│
+        │ 11. IR (forensic + rotate)    │
+        │ 12. Compliance (automate)     │
+        └──────────────────────────────┘
+        هر لایه‌ای که بشکند،
+        لایه بعدی باید جلوی فاجعه را بگیرد.
+
+ 

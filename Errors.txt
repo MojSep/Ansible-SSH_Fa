@@ -1,0 +1,1666 @@
+﻿🏭 خطاهای Ansible در محیط‌های عملیاتی Production — راهنمای جامع DevOps/SRE
+
+    این راهنما بر پایه تجربه واقعی محیط‌های عملیاتی است. هر خطا با سناریوی وقوع → پیام دقیق → ریشه فنی → رفع فوری → رفع دائمی → پیشگیری توضیح داده می‌شود.
+
+📡 دسته ۱: خطاهای اتصال SSH و شبکه
+1.1 UNREACHABLE! Failed to connect to the host via ssh: Connection timed out during banner exchange
+
+سناریو: اجرای playbook روی ۵۰ سرور، ناگهان ۳۰٪ unreachable می‌شوند — معمولاً صبح‌ها پس از بکاپ شبانه.
+
+ریشه فنی:
+
+    MaxStartups در sshd (پیش‌فرض 10:30:100) — پس از ۱۰ اتصال همزمان، ۳۰٪ رد، از ۱۰۰ رد کامل
+
+    fail2ban روی هدف به‌دلیل تلاش‌های ناموفق قبلی، IP کنترل‌نود را ban کرده
+
+    ControlPersist سوکت قدیمی گیر کرده
+
+    فایروال/NAT حداکثر تعداد اتصال concurrent session را می‌بندد
+
+رفع فوری:
+bash
+
+# از کنترل نود
+rm -rf ~/.ansible/cp/*
+ssh -o ConnectTimeout=5 -o BatchMode=yes user@target 'echo ok'
+
+# روی هدف
+sudo fail2ban-client status sshd
+sudo fail2ban-client set sshd unbanip <control-node-ip>
+sudo sshd -T | grep -i maxstartups
+
+رفع دائمی:
+bash
+
+# /etc/ssh/sshd_config روی هدف
+MaxStartups 100:30:200
+MaxSessions 50
+LoginGraceTime 30
+
+# whitelist کنترل‌نود در fail2ban
+/etc/fail2ban/jail.local:
+[sshd]
+ignoreip = 10.0.0.0/24 <control-node-ip>
+
+پیشگیری:
+
+    forks = 20 حداکثر (نه ۵۰)
+
+    serial: 10 یا serial: "30%" در playbookهای بزرگ
+
+    مانیتورینگ sshd با متریک sshd_sessions
+
+    ssh_args = ... -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=3
+
+1.2 SSH Error: data could not be sent to remote host
+
+سناریو: اجرای متوالی چند playbook روی همان هاست، اتصال قطع می‌شود ولی ping کار می‌کند.
+
+ریشه فنی: سوکت ControlPersist در ~/.ansible/cp/ خراب شده؛ یا pipelining=True با requiretty فعال در sudoers.
+
+رفع فوری:
+bash
+
+rm -rf ~/.ansible/cp/*
+# اگر مشکل تکرار شد موقتاً:
+ANSIBLE_PIPELINING=False ansible-playbook site.yml
+
+رفع دائمی:
+bash
+
+# /etc/sudoers روی هدف
+Defaults:ansible !requiretty
+Defaults env_keep += "SSH_AUTH_SOCK"
+
+پیشگیری: مانیتورینگ حجم ~/.ansible/cp با cron پاک‌سازی روزانه؛ ControlPersist=300s نه 1h.
+1.3 Too many authentication failures / Permission denied (publickey,password)
+
+سناریو: کاربر deploy روی ۲۰۰ سرور، همه با SSH key، ولی روی یک هاست جدید خطا.
+
+ریشه فنی:
+
+    ssh-agent بیش از ۶ کلید لود دارد → MaxAuthTries 6 در sshd → fail
+
+    authorized_keys روی هدف شامل کلید نیست
+
+    SELinux context روی ~/.ssh/authorized_keys غلط (user_home_t به‌جای ssh_home_t)
+
+    home directory permissions (755 باید باشد، نه 775)
+
+    AllowUsers/AllowGroups در sshd_config
+
+رفع:
+bash
+
+# دیباگ
+ssh -vvv -i ~/.ssh/id_deploy -o IdentitiesOnly=yes deploy@host
+
+# روی هدف
+sudo sshd -T | grep -E 'AllowUsers|AllowGroups|MaxAuthTries'
+ls -laZ ~deploy/.ssh/
+sudo restorecon -Rv ~deploy/.ssh/
+
+# تعداد کلیدهای agent
+ssh-add -l
+ssh-add -D  # پاک‌سازی و افزودن فقط کلید لازم
+
+پیشگیری:
+
+    ssh_args = ... -o IdentitiesOnly=yes
+
+    در inventory: ansible_ssh_private_key_file=/etc/ansible/keys/deploy_ed25519
+
+    automation برای چک authorized_keys با authorized_key module
+
+1.4 Host key verification failed در محیط production
+
+سناریو: پس از rebuild سرور، fingerprint عوض شده، playbook fail می‌شود.
+
+ریشه فنی: host_key_checking=True (درست) ولی known_hosts قدیمی است.
+
+رفع فوری:
+bash
+
+ssh-keygen -R hostname
+ssh-keyscan -t ed25519,rsa hostname >> /etc/ssh/ssh_known_hosts
+# یا اگر از CA استفاده می‌کنید:
+# HostCertificatePath در sshd_config
+
+رفع دائمی (production-grade):
+
+    راه‌اندازی SSH Host CA با ssh-keygen -s ca_key -I hostname -h -n hostname -V +52w host_key.pub
+
+    توزیع @cert-authority *.example.com ssh-ed25519 AAAA... در ssh_known_hosts
+
+    غیرفعال‌کردن regenerating fingerprints در image
+
+پیشگیری:
+
+    Provisioning pipeline: بعد از هر rebuild، key از CM می‌آید نه regenerate
+
+    known_hosts مرکزی در /etc/ssh/ssh_known_hosts با پیکربندی مدیریت‌شده
+
+    host_key_checking=True هرگز در prod تغییر نکن
+
+1.5 Connection reset by peer در مقیاس
+
+سناریو: اجرای playbook روی ۱۰۰+ سرور، تعداد زیادی خطای گذرا.
+
+ریشه فنی:
+
+    forks بالا → burst اتصال
+
+    sshd به MaxStartups می‌رسد
+
+    load balancer / NAT session table پر می‌شود
+
+    IDS/IPS rule trigger
+
+رفع:
+yaml
+
+- hosts: all
+  serial: 20
+  max_fail_percentage: 10
+
+پیشگیری:
+
+    forks = 15-25 در محیط‌های بزرگ
+
+    serial و throttle در taskهای شبکه‌ای:
+
+yaml
+
+- name: heavy network task
+  uri: ...
+  throttle: 5
+
+    استفاده از ansible-runner یا AAP برای rate limiting
+
+    اجرای rolling با serial: [1, 5, 20]
+
+🔑 دسته ۲: احراز هویت و Privilege Escalation
+2.1 Missing sudo password / sudo: a password is required
+
+سناریو: کاربر جدید deploy بعد از rotating کلیدها، playbook fail می‌شود.
+
+ریشه فنی: NOPASSWD حذف شده؛ یا become_ask_pass=False ولی رمز لازم.
+
+رفع فوری:
+bash
+
+ansible-playbook -K site.yml
+# یا
+echo "password" | ansible-playbook -K site.yml  # ⚠️ ناامن
+
+رفع دائمی:
+bash
+
+# /etc/sudoers.d/ansible (chmod 440)
+ansible ALL=(ALL) NOPASSWD: ALL
+Defaults:ansible !requiretty
+Defaults:ansible !visiblepw
+Defaults:ansible env_reset
+Defaults:ansible secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+پیشگیری:
+
+    whitelist دستورات در sudoers (نه ALL):
+
+text
+
+ansible ALL=(root) NOPASSWD: /usr/bin/apt, /usr/bin/systemctl, /usr/bin/dpkg
+
+    audit تغییرات /etc/sudoers.d/ با auditd
+
+    تست sudo -n true در preflight playbook
+
+2.2 Timeout (12s) waiting for privilege escalation prompt
+
+سناریو: سرورهای جدید که در domain هستند، become هربار timeout.
+
+ریشه فنی:
+
+    sudo برای resolve نام کاربر، به LDAP/AD وصل می‌شود و کند است
+
+    sudo prompt روی stderr با -v دیده نمی‌شود
+
+    become_timeout پیش‌فرض 12 ثانیه کافی نیست
+
+رفع:
+yaml
+
+# در playbook
+- hosts: all
+  become: true
+  vars:
+    ansible_become_timeout: 60
+
+پیشگیری:
+
+    /etc/nsswitch.conf: cache برای passwd/group (sss/systemd)
+
+    sssd با cache_credentials = True
+
+    NOPASSWD برای ansible در sudoers
+
+2.3 Sorry, user ansible is not allowed to execute '/bin/bash' as root on host
+
+سناریو: کاربر ansible با sudoers محدود، ماژول نیاز به shell دارد.
+
+ریشه فنی: sudoers whitelist شامل /bin/bash نیست؛ یا become_method نیاز به دستور خاص دارد.
+
+رفع: مجاز کردن دستور دقیق در sudoers، نه کل bash.
+
+پیشگیری: استفاده از become_method: sudo با become_exe: /usr/bin/sudo و taskهای دقیق. اجتناب از shell: هرجا command: کافی است.
+📋 دسته ۳: Inventory و متغیرها
+3.1 undefined variable: ansible_facts['xxx']
+
+سناریو: بعد از ارتقاء Ansible، playbook fail می‌شود که fact ناموجود است.
+
+ریشه فنی:
+
+    gather_subset محدود شده (مثلاً min بدون hardware)
+
+    fact deprecated و حذف شده (مثلاً ansible_processor در نسخه جدید)
+
+    gather_facts: false روی play
+
+رفع فوری:
+yaml
+
+# چک کنید
+- debug: var=ansible_facts
+  when: ansible_facts is defined
+
+# اضافه کردن subset لازم
+- setup:
+    gather_subset: ['all']
+
+رفع دائمی:
+
+    با ansible_facts['key'] (nested) استفاده کن نه ansible_key (flat)
+
+    default() استفاده کن برای سازگاری:
+
+yaml
+
+"{{ ansible_facts.get('processor_count', 1) }}"
+
+    inject_facts_as_vars = False و تعویض همه به nested
+
+پیشگیری:
+
+    ماتریس سازگاری نسخه‌ها در CI
+
+    ansible-lint با rule no-undefined-vars
+
+    تست --check روی staging قبل از prod
+
+3.2 Could not match supplied host pattern, ignoring: <group>
+
+سناریو: CI/CD pipe، گروه webservers در staging هست ولی در prod نیست، pipeline ساکت شکست می‌خورد.
+
+ریشه فنی: گروه تعریف نشده؛ یا inventory داینامیک آن گروه را برنگرداند.
+
+رفع فوری:
+bash
+
+ansible-inventory -i inventory/production --graph
+ansible-inventory -i inventory/production --host web01
+
+رفع دائمی:
+
+    inventory_unparsed_failed = True
+
+    assertion در ابتدای playbook:
+
+yaml
+
+- hosts: localhost
+  tasks:
+    - assert:
+        that:
+          - groups['webservers'] is defined
+          - groups['webservers'] | length > 0
+
+پیشگیری:
+
+    schema validation برای inventory در CI
+
+    ansible-inventory --graph در preflight
+
+    استفاده از dynamic inventory با keyed_groups بجای hardcode
+
+3.3 متغیرها به‌درستی override نمی‌شوند (variable precedence)
+
+سناریو: مقدار http_port=8080 در host_vars ست شده ولی سرویس روی ۸۰ اجرا می‌شود.
+
+ریشه فنی: اولویت متغیرها — role vars بالاتر از host_vars. یا set_fact در یه role دیگر.
+
+رفع فوری:
+yaml
+
+- debug:
+    var: http_port
+- debug:
+    msg: "{{ hostvars[inventory_hostname] | dict2items | selectattr('key','match','.*port.*') | list }}"
+
+پیشگیری:
+
+    ansible-inventory --host <name> برای دیدن متغیرهای مؤثر
+
+    نام‌گذاری نقش‌محور: nginx_port, postgres_port (نه port)
+
+    hash_behaviour = replace (پیش‌فرض، نه merge)
+
+    مستندسازی matrix precedence در runbook
+
+🐍 دسته ۴: Python Interpreter
+4.1 The module failed to execute correctly, you probably need to set the interpreter
+
+سناریو: هاست جدید Ubuntu 24.04، ansible_python_interpreter=auto مسیر /usr/bin/python را می‌دهد ولی وجود ندارد.
+
+ریشه فنی: Ubuntu 24.04 python (بدون نسخه) را نصب نمی‌کند؛ فقط python3.
+
+رفع فوری:
+ini
+
+# ansible.cfg
+interpreter_python = /usr/bin/python3
+
+رفع دائمی:
+yaml
+
+# group_vars/all.yml
+ansible_python_interpreter: /usr/bin/python3
+
+پیشگیری:
+
+    interpreter_python = auto_silent در ansible.cfg
+
+    preflight playbook که command -v python3 را چک کند
+
+    اجرای اولیه raw: apt install python3 روی تازه‌نصب‌ها
+
+4.2 ImportError: No module named 'selinux' / 'apt' / 'dnf'
+
+سناریو: ماژول selinux/apt fail با ImportError.
+
+ریشه فنی: dependencies پایتون روی هدف نصب نیستند. روی Ubuntu minimal، python3-apt نیست.
+
+رفع فوری:
+bash
+
+# Ubuntu
+sudo apt install -y python3-apt python3-selinux
+
+# RHEL
+sudo dnf install -y python3-libselinux python3-dnf
+
+پیشگیری:
+
+    playbook bootstrap که قبل از هر چیز dependencies را نصب کند:
+
+yaml
+
+- hosts: all
+  gather_facts: no
+  tasks:
+    - raw: |
+        if command -v apt >/dev/null; then
+          apt install -y python3-apt
+        elif command -v dnf >/dev/null; then
+          dnf install -y python3-dnf
+        fi
+
+4.3 MODULE FAILURE بدون پیام واضح
+
+سناریو: ماژول خاصی روی هدف fail، ولی هیچ traceback معنی‌داری نیست.
+
+ریشه فنی: ماژول در محیط جداشده اجرا می‌شود؛ stderr به‌درستی منتقل نمی‌شود.
+
+رفع:
+bash
+
+ansible host -m <module> -a 'arg=val' -vvv \
+  -e ansible_keep_remote_files=true
+
+فایل temp را در /home/user/.ansible/tmp/... پیدا کن و دستی اجرا کن.
+
+پیشگیری:
+
+    ANSIBLE_KEEP_REMOTE_FILES=1 در debug
+
+    strategy: debug برای playbookهای پیچیده
+
+    callback_plugins = debug در کانفیگ دیباگ
+
+🔐 دسته ۵: Vault و Secrets
+5.1 Attempting to decrypt but no vault secrets found
+
+سناریو: CI/CD pipeline جدید، فایل vault جدید، بدون secret set.
+
+ریشه فنی: ANSIBLE_VAULT_PASSWORD_FILE و --vault-password-file تعریف نشده.
+
+رفع فوری:
+bash
+
+export ANSIBLE_VAULT_PASSWORD_FILE=/path/to/vault_pass
+# یا
+ansible-playbook --vault-password-file=vault_pass site.yml
+
+رفع دائمی (production-grade):
+
+    Vault password از HashiCorp Vault / AWS Secrets Manager:
+
+bash
+
+# vault-client.py
+#!/usr/bin/env python3
+import boto3, json
+sm = boto3.client('secretsmanager', region_name='us-east-1')
+print(json.loads(sm.get_secret_value(SecretId='ansible/vault')['SecretString'])['password'])
+
+bash
+
+ansible-playbook --vault-password-file=./vault-client.py site.yml
+
+پیشگیری:
+
+    --vault-id prod@vault-client.py --vault-id staging@vault-client-stg.py
+
+    هرگز رمز در ansible.cfg یا git
+
+    chmod 600 روی هر فایل رمز
+
+    Rotate رمز هر ۹۰ روز
+
+5.2 Decryption failed (no vault secrets were found that could decrypt)
+
+سناریو: یک فایل با vault-id dev رمز شده، ولی با --vault-id prod@... اجرا می‌شود.
+
+ریشه فنی: vault-id mismatch بین encrypt و decrypt.
+
+رفع:
+bash
+
+# بررسی vault-id در فایل
+head -1 encrypted_file.yml
+# $ANSIBLE_VAULT;1.2;AES256;prod
+#                                      ^^^^ این vault-id است
+
+# decrypt با همان id
+ansible-vault view --vault-id prod@prompt encrypted_file.yml
+
+# یا rekey
+ansible-vault rekey --vault-id dev@old --new-vault-id prod@new encrypted_file.yml
+
+پیشگیری: مستندسازی vault-id map در README تیم؛ تست decrypt در CI.
+5.3 Secret در log یا output playbook لو می‌رود
+
+سناریو: پس از اجرا، رمز دیتابیس در ansible.log یا output دیده می‌شود.
+
+ریشه فنی: no_log روی task تنظیم نشده؛ یا -vvv با variable در debug .
+
+رفع فوری:
+
+    پاک‌سازی log: > /var/log/ansible.log (اگر محرمانه‌ست)
+
+    rotate رمز در سیستم‌های هدف
+
+رفع دائمی:
+yaml
+
+- name: create database user
+  mysql_user:
+    name: "{{ db_user }}"
+    password: "{{ db_password }}"
+    priv: "{{ db_name }}.*:ALL"
+  no_log: true
+
+- name: task with sensitive loop
+  user:
+    name: "{{ item.user }}"
+    password: "{{ item.pw_hash }}"
+  loop: "{{ users }}"
+  loop_control:
+    label: "{{ item.user }}"
+  no_log: true
+
+پیشگیری:
+
+    log_path با chmod 640 و گروه adm
+
+    SIEM rule روی password, secret, token, api_key در لاگ
+
+    pre-commit hook برای اسکن no_log روی taskهای حساس
+
+    ANSIBLE_LOG_PATH=/dev/null در CI (خروجی را collect کن، لاگ محلی نکن)
+
+🔧 دسته ۶: ماژول‌های Package Management
+6.1 apt lock: Could not get lock /var/lib/dpkg/lock-frontend
+
+سناریو: اجرای playbook همزمان با unattended-upgrades یا cronی دیگر.
+
+ریشه فنی: فقط یک apt lock می‌تواند فعال باشد.
+
+رفع فوری:
+bash
+
+# روی هدف
+sudo lsof /var/lib/dpkg/lock-frontend
+sudo systemctl stop unattended-upgrades
+sudo rm /var/lib/dpkg/lock-frontend  # فقط اگر پروسه مرده
+sudo dpkg --configure -a
+
+رفع دائمی:
+yaml
+
+- name: wait for apt lock
+  shell: |
+    while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do
+      sleep 2
+    done
+  changed_when: false
+
+- name: wait for unattended-upgrades
+  systemd:
+    name: unattended-upgrades
+    state: stopped
+  ignore_errors: yes
+
+پیشگیری:
+
+    خاموش کردن unattended-upgrades روی سرورهای مدیریت‌شده توسط Ansible
+
+    اجرای patch با پنجره مشخص
+
+    serial: 10% برای apt
+
+    apt با update_cache: yes و cache_valid_time: 3600
+
+6.2 yum/dnf: Failed to download metadata for repo
+
+سناریو: repo mirror در دسترس نیست یا GPG key missing.
+
+ریشه فنی:
+
+    mirror timeout
+
+    GPG key جدید در rpm --import نشده
+
+    proxy
+
+رفع:
+bash
+
+sudo dnf clean all
+sudo dnf makecache
+sudo rpm --import /etc/pki/rpm-gpg/RPM-GPG-KEY-*
+sudo dnf config-manager --set-disabled <bad-repo>
+
+پیشگیری:
+yaml
+
+- name: install with retries
+  dnf:
+    name: nginx
+    state: present
+  retries: 3
+  delay: 10
+  register: result
+  until: result is success
+
+    Mirror داخلی (Nexus/Artifactory)
+
+    dnf module version lock
+
+    CI smoke test روی mirror
+
+6.3 Package not found روی نسخه‌های مختلف OS
+
+سناریو: همان playbook روی Ubuntu 20.04، 22.04، 24.04 — پکیجی در یکی نیست (python3-apt قدیمی vs python3-apt جدید).
+
+ریشه فنی: تفاوت نام پکیج بین distro/version.
+
+رفع:
+yaml
+
+- name: install deps
+  package:
+    name: "{{ packages[ansible_distribution ~ '-' ~ ansible_distribution_major_version] }}"
+    state: present
+  vars:
+    packages:
+      Ubuntu-20.04: ['python3-apt', 'python3-pip']
+      Ubuntu-22.04: ['python3-apt', 'python3-pip']
+      Ubuntu-24.04: ['python3-apt', 'python3-pip', 'python3-yaml']
+
+پیشگیری:
+
+    ماتریس تست در Molecule/CI روی همه OS
+
+    package: module بجای apt:/dnf: صریح
+
+    vars per-OS در group_vars/<distro>.yml
+
+6.4 Transaction check error / dependency conflict در yum
+
+سناریو: نصب پکیج جدید که با نسخه قدیمی conflict دارد.
+
+ریشه فنی: modular package conflict، یا repo با نسخه قدیمی.
+
+رفع:
+bash
+
+sudo dnf repoquery --whatrequires <pkg>
+sudo dnf distro-sync
+sudo dnf module reset <module>
+
+پیشگیری:
+
+    state: present نه latest مگر deliberate
+
+    تست در staging هم‌نسخه prod
+
+    version pin در vars (nginx_version: 1.24.0)
+
+🖥️ دسته ۷: Service Management (systemd)
+7.1 Job for xxx.service failed because the control process exited with error code
+
+سناریو: systemd سرویس استارت نمی‌شود.
+
+ریشه فنی: config نامعتبر، پورت مشغول، permission، SELinux.
+
+رفع:
+bash
+
+sudo systemctl status xxx -l
+sudo journalctl -u xxx -n 100 --no-pager
+sudo systemctl daemon-reload
+sudo /usr/sbin/nginx -t  # برای nginx
+
+پیشگیری:
+yaml
+
+- name: validate nginx config
+  command: nginx -t
+  changed_when: false
+  check_mode: no
+
+- name: reload nginx
+  systemd:
+    name: nginx
+    state: reloaded
+    daemon_reload: yes
+  when: nginx_config is changed
+
+- name: health check
+  uri:
+    url: "http://localhost/health"
+  retries: 5
+  delay: 2
+
+7.2 System has not been booted with systemd as init system (کانتینر)
+
+سناریو: اجرای playbook روی Docker container.
+
+ریشه فنی: container بدون systemd (PID 1 نیست).
+
+رفع:
+yaml
+
+- service:
+    name: xxx
+    state: started
+  when: ansible_service_mgr == 'systemd'
+
+- command: /etc/init.d/xxx start
+  when: ansible_service_mgr == 'sysvinit'
+
+پیشگیری:
+
+    ansible_service_mgr fact را چک کن در when
+
+    برای container از docker_container/k8s ماژول استفاده کن
+
+7.3 start request repeated too quickly (systemd rate limit)
+
+سناریو: سرویس fail می‌شود، systemd پس از ۵ تلاش متوالی، rate-limit می‌کند.
+
+ریشه فنی: StartLimitBurst و StartLimitIntervalSec.
+
+رفع:
+bash
+
+sudo systemctl reset-failed xxx
+sudo systemctl start xxx
+
+ini
+
+# /etc/systemd/system/xxx.service.d/override.conf
+[Unit]
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+📁 دسته ۸: فایل، دسترسی، و SELinux/AppArmor
+8.1 Permission denied روی /etc/xxx با become: true
+
+ریشه فنی:
+
+    SELinux enforcing روی هدف
+
+    become_user غلط (مثلاً root ولی سرویس به nginx نیاز دارد)
+
+    noexec mount روی /tmp (برای ماژول)
+
+رفع:
+bash
+
+# روی هدف
+sudo ausearch -m avc -ts recent
+sudo semanage fcontext -a -t httpd_sys_content_t "/var/www(/.*)?"
+sudo restorecon -Rv /var/www
+getenforce
+
+پیشگیری:
+yaml
+
+- name: set SELinux context
+  community.general.sefcontext:
+    target: '/var/www/html(/.*)?'
+    setype: httpd_sys_content_t
+    state: present
+
+- name: apply context
+  command: restorecon -Rv /var/www/html
+  changed_when: false
+
+8.2 Destination directory does not exist
+
+ریشه فنی: copy/template به مسیر ناموجود؛ والد ساخته نمی‌شود.
+
+رفع:
+yaml
+
+- file: path=/etc/myapp state=directory mode=0755
+
+- template:
+    src: config.j2
+    dest: /etc/myapp/config.conf
+
+پیشگیری: همیشه file: state=directory قبل از copy/template.
+8.3 Could not find or access '/path/to/file' روی src
+
+ریشه فنی: مسیر نسبی از role/files/ ولی فایل در role/templates/ است یا مسیر اشتباه.
+
+رفع: ls -la role/files/ role/templates/؛ -vvv برای دیدن resolve.
+
+پیشگیری: استفاده مداوم از ساختار استاندارد role؛ ansible-lint rule.
+8.4 Argument 'src' is of type <class 'dict'> and we were unable to convert to str
+
+ریشه فنی: {{ var }} به‌جای {{ var.path }}؛ یا YAML indentation.
+
+رفع: debug: var=var قبل از task؛ Jinja2 | string.
+🧠 دسته ۹: Jinja2 و Template
+9.1 AnsibleUndefinedVariable: 'xxx' is undefined
+
+سناریو: playbook staging کار می‌کند، prod fail.
+
+ریشه فنی: متغیر در group_vars/prod.yml تعریف نشده، یا conditional مسیر متفاوت دارد.
+
+رفع فوری:
+bash
+
+ansible-playbook -e @group_vars/prod.yml site.yml -vvv --start-at-task="failing"
+
+پیشگیری:
+yaml
+
+"{{ xxx | default('fallback') }}"
+
+    schema validation متغیرها
+
+    assert در ابتدای play
+
+    ansible-lint rule no-undefined-vars
+
+9.2 Template error while templating string: expected token ':'
+
+ریشه فنی: syntax Jinja2 — معمولاً {{ }} بدون space یا dict syntax.
+
+رفع: ansible-playbook --syntax-check؛ yamllint؛ تست Jinja با python -m jinja2.
+
+پیشگیری:
+yaml
+
+# همیشه space در Jinja
+"{{ var }}"  # ✅
+"{{var}}"    # ❌
+
+9.3 Recursive loop detected in template string: {{ xxx }}
+
+ریشه فنی: متغیر خودش را ref می‌کند یا circular بین defaults و group_vars.
+
+رفع: تغییر نام؛ set_fact؛ debug: var=xxx.
+9.4 to_yaml / to_json ناقص روی dict فارسی یا کاراکترهای خاص
+
+ریشه فنی: encoding روی template با keep_trailing_newline و trim_blocks.
+
+رفع:
+yaml
+
+- template:
+    src: config.j2
+    dest: /etc/app/config.yml
+    trim_blocks: yes
+    lstrip_blocks: yes
+
+🔄 دسته ۱۰: Idempotency و State Drift
+10.1 task همیشه changed: true (idempotency شکسته)
+
+سناریو: هر بار playbook اجرا می‌شود، همه taskها changed.
+
+ریشه فنی:
+
+    command:/shell: بدون creates/removes/changed_when
+
+    lineinfile بدون regexp
+
+    template با {{ ansible_date_time }} که هربار تغییر می‌کند
+
+    ماژول با force: yes
+
+رفع:
+yaml
+
+- name: idempotent command
+  command: /usr/local/bin/migrate
+  args:
+    creates: /var/lib/app/.migrated
+
+- name: line with regexp
+  lineinfile:
+    path: /etc/ssh/sshd_config
+    regexp: '^PermitRootLogin'
+    line: 'PermitRootLogin no'
+
+- name: template بدون زمان
+  template:
+    src: config.j2
+    dest: /etc/app/config
+  vars:
+    deploy_time: "{{ deploy_timestamp | default('static') }}"
+
+پیشگیری:
+
+    --check + --diff در CI
+
+    idempotency_test با Molecule: دو بار اجرا، بار دوم changed=0
+
+    ansible-lint rule no-changed-when
+
+10.2 changed_when: false روی taskهای ضروری — drift detection را می‌کشد
+
+ریشه فنی: مهندس برای پنهان کردن changed از این استفاده می‌کند، در حالی که واقعاً تغییر می‌دهد.
+
+پیشگیری: فقط برای commandهای read-only؛ برای بقیه changed_when: <condition> دقیق.
+🎯 دسته ۱۱: Handlers و Notifications
+11.1 ERROR! The requested handler 'restart xxx' was not found
+
+سناریو: task با notify: restart nginx ولی handler در role دیگر است که include نشده.
+
+ریشه فنی: handler scope در play است، نه کل پروژه.
+
+رفع:
+yaml
+
+# در playbook اصلی
+- hosts: all
+  handlers:
+    - name: restart nginx
+      systemd: name=nginx state=restarted
+
+پیشگیری:
+
+    handlers در role/handlers/main.yml
+
+    notify باید دقیقاً با name: در handler مطابقت داشته باشد
+
+    --list-tasks برای دیدن handlerها
+
+11.2 Handler اجرا نمی‌شود
+
+سناریو: task تغییر می‌کند ولی handler اجرا نمی‌شود.
+
+ریشه فنی:
+
+    notify در block با always هرگز trigger نمی‌شود
+
+    --check mode: handlerها اجرا نمی‌شوند
+
+    meta: flush_handlers نبودن قبل از task دیگر
+
+رفع:
+yaml
+
+- block:
+    - name: change config
+      template: ...
+      notify: restart app
+  always:
+    - meta: flush_handlers
+
+پیشگیری: meta: flush_handlers در پایان play و بعد از هر گروه task حساس.
+🌐 دسته ۱۲: Delegation و delegate_to
+12.1 The delegated task cannot have a different connection than the play
+
+سناریو: delegate_to: localhost در play با connection: ssh.
+
+ریشه فنی: connection در delegate_to از play ارث می‌برد.
+
+رفع:
+yaml
+
+- name: run on control node
+  command: ls /tmp
+  delegate_to: localhost
+  connection: local
+  run_once: true
+
+پیشگیری: تعریف play جدا برای localhost؛ مستندسازی در role README.
+12.2 delegate_to و fact hostvars
+
+سناریو: delegate_to: db-server ولی hostvars['db-server'] خالی است.
+
+ریشه فنی: هاست در inventory نیست، یا fact هنوز جمع نشده.
+
+رفع:
+yaml
+
+- setup:
+  delegate_to: db-server
+  delegate_facts: true
+
+- debug:
+    var: hostvars['db-server']
+
+🔌 دسته ۱۳: Network Devices (network_cli, netconf)
+13.1 Unable to open shell / connection plugin failed
+
+سناریو: playbook روی switch سیسکو fail.
+
+ریشه فنی:
+
+    ansible_network_os تنظیم نشده
+
+    ansible_connection=network_cli ولی ansible_network_os=ios تعریف نشده
+
+    SSH خاموش روی دستگاه
+
+رفع:
+yaml
+
+# inventory
+switch01 ansible_host=10.0.0.1 ansible_user=admin \
+         ansible_connection=network_cli \
+         ansible_network_os=cisco.ios.ios \
+         ansible_become=yes ansible_become_method=enable
+
+پیشگیری:
+
+    ansible_network_os اجباری
+
+    collections مناسب: cisco.ios, arista.eos, junipernetworks.junos
+
+    persistent_connection timeout مناسب (نه 30s، بیشتر برای شبکه‌های کند)
+
+13.2 Config could not be applied. Idempotency issue
+
+ریشه فنی: ios_config بدون match: line یا replace: block.
+
+رفع:
+yaml
+
+- cisco.ios.ios_config:
+    lines:
+      - ntp server 8.8.8.8
+    match: line  # یا exact
+    replace: block  # برای multi-line
+
+☁️ دسته ۱۴: Cloud Modules
+14.1 AWS: NoCredentialsError: Unable to locate credentials
+
+ریشه فنی: credentials روی control node یا هاست delegate_to: localhost نیست.
+
+رفع:
+bash
+
+# روی control node
+aws configure
+# یا IAM role (اگر روی EC2)
+# یا
+export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...
+
+پیشگیری:
+yaml
+
+- name: ec2 operations
+  amazon.aws.ec2_instance: ...
+  delegate_to: localhost
+  vars:
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+  environment:
+    AWS_PROFILE: "{{ aws_profile }}"
+
+    amazon.aws.aws_ec2 inventory با IAM role
+
+    عدم استفاده از access key hardcode
+
+14.2 AWS: An error occurred (UnauthorizedOperation) when calling the ...
+
+ریشه فنی: IAM policy ناقص.
+
+رفع: بررسی iam-policy برای کاربر؛ AWS CloudTrail برای دیدن event.
+
+پیشگیری:
+
+    IAM role با least-privilege (نه AdministratorAccess)
+
+    تست در حساب sandbox اول
+
+14.3 Azure: The client 'xxx' with object id 'yyy' does not have authorization
+
+ریشه فنی: Service Principal role assignment ناقص.
+
+رفع:
+bash
+
+az role assignment create --assignee <sp-id> --role Contributor --scope /subscriptions/<sub>
+
+14.4 botocore.exceptions.EndpointConnectionError
+
+ریشه فنی: region غلط، proxy، یا AWS endpoint URL قدیمی.
+
+رفع: aws configure set region us-east-1؛ AWS_ENDPOINT_URL؛ چک proxy.
+🐳 دسته ۱۵: Containers و Kubernetes
+15.1 kubernetes.core.k8s: Failed to establish a new connection: [Errno 111] Connection refused
+
+ریشه فنی: KUBECONFIG، token منقضی، یا context اشتباه.
+
+رفع:
+bash
+
+kubectl config current-context
+kubectl cluster-info
+kubectl get --raw /healthz
+
+پیشگیری:
+yaml
+
+- kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Namespace
+  vars:
+    ansible_k8s_kubeconfig: "{{ kubeconfig_path }}"
+
+    ServiceAccount + Role/ClusterRole به‌جای admin kubeconfig
+
+    Rotate token هر ۹۰ روز
+
+15.2 Docker: Cannot connect to the Docker daemon
+
+ریشه فنی: user در گروه docker نیست؛ یا socket path.
+
+رفع:
+bash
+
+sudo usermod -aG docker $USER
+newgrp docker
+
+پیشگیری: become: true برای taskهای docker؛ یا community.docker.docker_* با docker_host: unix:///var/run/docker.sock.
+🔁 دسته ۱۶: Concurrency و Race Conditions
+16.1 اجرای موازی → نتیجه ناسازگار
+
+سناریو: forks=50، چند هاست یک فایل shared روی NFS می‌نویسند → خراب.
+
+ریشه فنی: هیچ قفلی در Ansible نیست.
+
+رفع:
+yaml
+
+- name: acquire lock
+  community.general.pids:
+    name: /tmp/myapp.lock
+    state: absent
+  ignore_errors: yes
+
+- name: write shared file
+  template: ...
+  throttle: 1
+  run_once: true
+
+پیشگیری:
+
+    throttle برای taskهای network/API
+
+    serial برای cluster
+
+    run_once: true برای عملیات مشترک
+
+16.2 Database migration اجرای دو بار
+
+سناریو: با serial: 10%، migration روی هر دو batch اجرا شد.
+
+ریشه فنی: task بدون run_once: true؛ یا migration خودش idempotent نیست.
+
+رفع:
+yaml
+
+- name: run migration
+  command: /app/migrate
+  args:
+    creates: /var/lib/app/migrated
+  run_once: true
+  delegate_to: "{{ groups['db_primary'][0] }}"
+
+📊 دسته ۱۷: Performance و مقیاس
+17.1 TASK [Gathering Facts] *** بسیار کند
+
+ریشه فنی: gather_subset=all روی سرورهای با data زیاد؛ هر هاست ۱۰-۳۰ ثانیه.
+
+رفع:
+ini
+
+# ansible.cfg
+gathering = smart
+gather_subset = "!all,!hardware,!facter,!ohai,min,network,virtual"
+fact_caching = jsonfile
+fact_caching_connection = /var/cache/ansible/facts
+fact_caching_timeout = 86400
+
+پیشگیری:
+
+    cache در Redis برای cluster AAP:
+
+ini
+
+fact_caching = redis
+fact_caching_connection = redis-host:6379:0
+fact_caching_timeout = 86400
+
+17.2 اجرای playbook روی ۵۰۰ هاست بیشتر از ۲ ساعت طول می‌کشد
+
+ریشه فنی: forks پایین، taskهای serial، wait_for طولانی.
+
+رفع:
+ini
+
+forks = 50
+
+yaml
+
+- hosts: all
+  serial: "20%"
+  strategy: free  # موازی‌سازی بیشتر
+  gather_facts: no
+
+پیشگیری:
+
+    profile_tasks callback برای شناسایی task کند:
+
+ini
+
+callbacks_enabled = profile_tasks, timer
+
+    split playbook به site.yml + patch.yml + deploy.yml
+
+    strategy: free برای playbookهای غیر وابسته
+
+    async + poll: 0 برای taskهای بلند
+
+17.3 async task هرگز تمام نمی‌شود
+
+ریشه فنی: async: 3600 ولی poll: 0 — نیاز به async_status follow-up.
+
+رفع:
+yaml
+
+- name: long running
+  command: /usr/local/bin/backup.sh
+  async: 3600
+  poll: 0
+  register: backup_job
+
+- name: wait for backup
+  async_status:
+    jid: "{{ backup_job.ansible_job_id }}"
+  register: job_result
+  until: job_result.finished
+  retries: 60
+  delay: 60
+
+🖥️ دسته ۱۸: Windows / WinRM
+18.1 winrm: 401 Unauthorized / Kerberos: Cannot contact any KDC
+
+ریشه فنی: تنظیمات Kerberos، SPN، یا HTTPS.
+
+رفع:
+bash
+
+# روی کنترل نود
+sudo apt install krb5-user python3-kerberos
+kinit user@EXAMPLE.COM
+klist
+
+yaml
+
+# inventory
+win01 ansible_host=10.0.0.5 \
+  ansible_user=EXAMPLE\\user \
+  ansible_connection=winrm \
+  ansible_winrm_transport=kerberos \
+  ansible_winrm_scheme=https \
+  ansible_winrm_server_cert_validation=validate \
+  ansible_winrm_kerberos_delegation=false
+
+پیشگیری:
+
+    Certificate معتبر در WinRM
+
+    SPN correct: setspn -L <computer>
+
+    Group Managed Service Accounts (gMSA) برای automation
+
+18.2 The maximum number of concurrent operations for this user has been exceeded
+
+ریشه فنی: MaxConcurrentOperationsPerUser WinRM پیش‌فرض ۵۰.
+
+رفع:
+powershell
+
+winrm set winrm/config/service '@{MaxConcurrentOperationsPerUser="200"}'
+
+پیشگیری: forks=20 برای Windows؛ serial برای taskهای WinRM.
+🔬 دسته ۱۹: Fact Caching و Dynamic Inventory
+19.1 Fact cache خراب / stale
+
+سناریو: هاست بعد از ارتقاء OS، fact قدیمی هنوز cache است.
+
+رفع:
+bash
+
+rm -rf /var/cache/ansible/facts/<hostname>
+# یا
+ansible host -m setup --flush-cache
+
+پیشگیری:
+
+    fact_caching_timeout = 7200 (نه یک هفته)
+
+    invalidation بعد از تغییر عمده
+
+    در inventory: ansible_clear_facts=yes برای rebuild
+
+19.2 Dynamic inventory همیشه هاست‌های حذف‌شده را نگه می‌دارد
+
+ریشه فنی: cache از plugin (مثلاً aws_ec2) فعال است.
+
+رفع:
+yaml
+
+# inventory_aws_ec2.yml
+plugin: amazon.aws.aws_ec2
+cache: false
+# یا
+cache: true
+cache_plugin: jsonfile
+cache_timeout: 300
+
+پیشگیری: cache_timeout کوتاه (300s)؛ یا --flush-cache در CI.
+🚀 دسته ۲۰: Rolling Update و High Availability
+20.1 کل cluster همزمان restart شد
+
+سناریو: restart nginx روی همه هاست‌ها با forks=50، سایت قطع.
+
+ریشه فنی: بدون serial، بدون max_fail_percentage.
+
+رفع:
+yaml
+
+- hosts: webservers
+  serial: "25%"
+  max_fail_percentage: 10
+  tasks:
+    - name: restart
+      systemd: name=nginx state=restarted
+      notify: healthcheck
+  handlers:
+    - name: healthcheck
+      uri:
+        url: "http://{{ inventory_hostname }}/health"
+      retries: 10
+      delay: 3
+
+پیشگیری:
+
+    serial: [1, 5, 10, "25%"] (canary → small → large)
+
+    load balancer drain قبل از restart:
+
+yaml
+
+- name: drain from LB
+  uri:
+    url: "http://lb/api/drain/{{ inventory_hostname }}"
+  delegate_to: localhost
+  run_once: true
+
+    health check بین batchها
+
+    max_fail_percentage برای abort خودکار
+
+20.2 delegate_to از LB به هاست بدون inventory
+
+ریشه فنی: LB در inventory نیست.
+
+رفع:
+yaml
+
+- hosts: localhost
+  tasks:
+    - uri:
+        url: "http://lb/api/drain/{{ item }}"
+      loop: "{{ groups['webservers'] }}"
+
+🔌 دسته ۲۱: Collections و Galaxy
+21.1 ERROR! Unable to find collection requirements file
+
+رفع:
+bash
+
+ls collections/requirements.yml
+ansible-galaxy collection install -r collections/requirements.yml -p ./collections
+
+پیشگیری: pin کردن نسخه در requirements.yml:
+yaml
+
+collections:
+  - name: community.general
+    version: ">=7.0.0,<8.0.0"
+  - name: amazon.aws
+    version: "==6.5.0"
+
+21.2 Collection version conflict
+
+ریشه فنی: دو role نیاز به نسخه‌های متفاوت.
+
+رفع:
+bash
+
+ansible-galaxy collection list
+ansible-galaxy collection install --force-with-deps community.general:7.5.0
+
+پیشگیری:
+
+    requirements.yml واحد پروژه
+
+    تست در venv تمیز
+
+    pip freeze + ansible-galaxy list > lock.txt
+
+21.3 ansible-galaxy install timeout
+
+ریشه فنی: Galaxy rate limit یا network.
+
+رفع:
+bash
+
+ansible-galaxy install --timeout 120 ...
+
+پیشگیری:
+
+    Mirror داخلی (Automation Hub، Artifactory)
+
+    ansible.cfg: [galaxy] server = <internal>
+
+    Pre-cached collectionها در image
+
+🖨️ دسته ۲۲: Callback و Output
+22.1 Callback plugin xxx failed
+
+ریشه فنی: plugin سازگار با نسخه ansible نیست؛ یا Python exception.
+
+رفع:
+ini
+
+[defaults]
+callbacks_enabled = profile_tasks  # فقط معتبرها
+
+پیشگیری: تست callback در CI؛ از official collectionها.
+22.2 to_json output حجیم
+
+ریشه فنی: stdout_callback=json روی playbook با ۱۰۰۰ task.
+
+رفع: stdout_callback=yaml یا minimal + ارسال JSON به فایل:
+yaml
+
+- copy:
+    content: "{{ result | to_nice_json }}"
+    dest: /tmp/result.json
+  delegate_to: localhost
+
+🧪 دسته ۲۳: CI/CD Integration
+23.1 Pipeline hang در task awaiting input
+
+سناریو: CI job hung، ansible-playbook منتظر become password.
+
+ریشه فنی: become_ask_pass=True یا vault بدون secret.
+
+رفع:
+bash
+
+ansible-playbook --non-interactive ...
+# یا
+export ANSIBLE_NON_INTERACTIVE=1
+
+پیشگیری:
+
+    ANSIBLE_STDOUT_CALLBACK=json + parse در CI
+
+    timeout روی job CI (مثلاً ۳۰ دقیقه)
+
+    --check در PR stage، --diff برای مرور
+
+23.2 Secret leak در CI log
+
+ریشه فنی: no_log نیست؛ pipeline لاگ را archive می‌کند.
+
+رفع:
+
+    پاک‌سازی artifact log
+
+    rotate secrets
+
+پیشگیری:
+yaml
+
+- name: sensitive
+  uri:
+    url: "{{ api }}"
+    headers:
+      Authorization: "Bearer {{ api_token }}"
+  no_log: true
+
+    pre-commit hook detect-secrets
+
+    CI secret masking در GitLab/GitHub
+
+🛠️ دسته ۲۴: خطاهای غیرمنتظره Runtime
+24.1 Unexpected Exception, this is probably a bug
+
+ریشه فنی: bug در core یا collection؛ یا state corrupt در cache.
+
+رفع:
+bash
+
+ansible-playbook -vvv ... 2>&1 | tee /tmp/ansible_trace.log
+rm -rf ~/.ansible/tmp/* ~/.ansible/cp/*
+pip3 install --upgrade ansible-core
+
+پیشگیری: نسخه pin شده؛ تست در staging؛ گزارش به issues.
+24.2 Module has no attribute 'xxx' (نسخه collection قدیمی)
+
+ریشه فنی: FQCN جدید یا پارامتر جدید module، collection قدیمی.
+
+رفع:
+bash
+
+ansible-galaxy collection install --upgrade <coll>
+
+پیشگیری: pin کردن نسخه در requirements.yml + ارتقاء deliberate.
+🧭 راهنمای ترتیبی دیباگ در production
+
+وقتی playbook در prod fail شد، به این ترتیب پیش برو:
+text
+
+1. --syntax-check           ← خطای YAML
+2. --list-tasks / --list-hosts  ← scope درست؟
+3. -C (check mode)          ← پیش‌بینی تغییرات
+4. -vvv --start-at-task=... ← نقطه شکست
+5. --check --diff           ← تفاوت فایل‌ها
+6. ssh مستقیم به هاست       ← خطای SSH یا Ansible؟
+7. host -m setup -vvv       ← fact
+8. ansible-config dump      ← کانفیگ
+9. log_path + ANSIBLE_DEBUG ← trace عمیق
+10. ansible-inventory       ← inventory
+11. pip3 check              ← وابستگی‌ها
+12. ansible-lint            ← بهترین شیوه
+
+🛡️ چک‌لیست Production Readiness
+پیش از هر run
+
+    □
+
+    --syntax-check
+    □
+
+    --check --diff روی staging
+    □
+
+    health check قبل و بعد
+    □
+
+    backup + rollback plan
+    □
+
+    serial تعریف شده
+    □
+
+    max_fail_percentage تعریف شده
+    □
+
+    no_log روی taskهای حساس
+    □
+
+    monitoring alert silenced برای پنجره
+    □
+
+    کسی در حال تماشای dashboard
+    □
+
+    runbook باز
+
+زیرساخت
+
+    □
+
+    host_key_checking=True (نه False)
+    □
+
+    pipelining=True با !requiretty
+    □
+
+    become_method=sudo با NOPASSWD محدود
+    □
+
+    vault password از secret manager
+    □
+
+    fact caching فعال
+    □
+
+    collectionها pin شده
+    □
+
+    interpreter_python=/usr/bin/python3
+    □
+
+    forks متناسب (نه ۵۰ در همه محیط‌ها)
+    □
+
+    log_path با مجوز صحیح و retention
+    □
+
+    control_path_dir با chmod 700
+
+Monitoring
+
+    □
+
+    متریک زمان اجرای playbook (نه فقط موفقیت)
+    □
+
+    alert روی UNREACHABLE متعدد
+    □
+
+    alert روی become غیرمنتظره
+    □
+
+    alert روی shell: جدید در PR
+    □
+
+    SIEM روی ansible.log با rule برای secrets
+    □
+
+    auditd روی ansible.cfg، vault، authorized_keys
+
+🎯 خلاصه: ۱۵ خطای پرتکرار واقعی + رفع سریع
+#	خطا	رفع در ۳۰ ثانیه
+1	UNREACHABLE	rm -rf ~/.ansible/cp/* + ssh -o BatchMode=yes
+2	Missing sudo password	-K یا !requiretty
+3	python not found	interpreter_python=/usr/bin/python3
+4	apt lock	systemctl stop unattended-upgrades
+5	Module not found	ansible-galaxy collection install <coll>
+6	Host key verification	ssh-keyscan >> known_hosts
+7	Vault decrypt	--vault-password-file=...
+8	undefined var	-e @vars.yml یا default()
+9	to_yaml filter error	trim_blocks: yes
+10	handler not found	handler در play تعریف شود
+11	kernel module selinux	restorecon -Rv
+12	systemd start failed	journalctl -u + validate config
+13	winrm 401	kinit + ansible_winrm_transport=kerberos
+14	aws credentials	IAM role یا AWS_PROFILE
+15	callback failed	callbacks_enabled = profile_tasks
+💡 ده قانون طلایی برای جلوگیری از خطا در Production
+
+    همیشه --check قبل از اجرا — بدون استثنا.
+
+    serial برای هر چیزی که restart یا downtime دارد.
+
+    max_fail_percentage: 10 برای abort خودکار.
+
+    Health check handler در هر role که سرویس restart می‌کند.
+
+    no_log: true روی هر task با password/token/key.
+
+    requirements.yml pin شده برای collection/role.
+
+    ansible-lint + yamllint + molecule در CI.
+
+    interpreter_python صریح — نه auto.
+
+    Idempotency test (دو بار اجرا، بار دوم changed=0).
+
+    Monitoring + runbook — قبل از اینکه خطا رخ دهد، بدان چطور رفعش کنی.

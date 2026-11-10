@@ -1,0 +1,749 @@
+﻿🧠 تمام فکت‌های Ansible (ansible_facts) + توضیحات فنی دقیق
+
+    فکت‌ها توسط ماژول setup (ماژول پیش‌فرض gather) جمع‌آوری می‌شوند و در دیکشنری ansible_facts قرار می‌گیرند. با gather_subset می‌توان دسته‌ها را کنترل کرد. هر فکت به‌صورت ansible_facts['<key>'] یا به‌صورت flat با پیشوند ansible_<key> در دسترس است.
+
+📦 دسته‌های gather_subset (کنترل جمع‌آوری)
+زیرمجموعه	توضیح	نیاز به اجرا
+all	همه فکت‌ها (پیش‌فرض)	-
+min	فقط فکت‌های ضروری (OS, hostname, network basics)	سریع
+hardware	CPU, memory, devices, mounts	متوسط
+network	interfaces, IPs, routes	متوسط
+virtual	اطلاعات virtualization (docker, kvm, vmware, lxc...)	سبک
+ohai	فکت‌های Chef Ohai (اگر نصب)	نیاز به ohai
+facter	فکت‌های Puppet Facter (اگر نصب)	نیاز به facter
+!<subset>	استثنا کردن یک زیرمجموعه (مثلاً !hardware)	-
+
+مثال:
+yaml
+
+- setup:
+    gather_subset:
+      - "!hardware"
+      - "!facter"
+      - network
+
+🌳 درخت کلی فکت‌ها (ساختار ansible_facts)
+text
+
+ansible_facts/
+├── ansible_* (OS, hostname, user, ...)         ← فکت‌های پایه
+├── env/                                          ← متغیرهای محیطی
+├── cmdline/                                      ← آرگومان‌های kernel
+├── hostname/                                     ← نام‌های مختلف سیستم
+├── date_time/                                    ← زمان
+├── distribution/ , distribution_*               ← توزیع
+├── kernel, kernel_version, kernel_release, ...   ← هسته
+├── os_family, system, machine, architecture      ← سیستم
+├── python, python_version, python_executable     ← پایتون
+├── user_id, user_gid, user_gecos, ...            ← کاربر اجرا
+├── cpu/                                          ← پردازنده‌ها
+├── memory/ , memory_mb, memtotal_mb              ← حافظه
+├── mounts/                                       ← لیست mount points
+├── devices/                                      ← دیسک‌ها
+├── swap/                                         ← swap
+├── processor/ , processor_cores, ...             ← CPU (قدیمی)
+├── interfaces/                                   ← کارت‌های شبکه
+├── default_ipv4/ , default_ipv6/                 ← مسیر پیش‌فرض
+├── virtualization_*                              ← مجازی‌سازی
+├── selinux/                                      ← SELinux
+├── lsb/                                          ← LSB
+├── uptime_seconds                                ← آپ‌تایم
+├── localtime                                     ← زمان محلی (epoch)
+├── fips_enabled                                  ← FIPS
+├── system_capabilities                            ← capabilities
+├── ssh_host_key_*                                ← کلیدهای SSH میزبان
+├── packages/ (با پلاگین packages)                ← بسته‌های نصب‌شده
+├── services/ , service_mgr                       ← سرویس‌ها
+├── dns/                                          ← DNS
+├── ipv4/ , ipv6/                                 ← آدرس‌های IP
+├── hardware/                                     ← اطلاعات سخت‌افزار
+├── virtual/, virtual_docker/, ...                ← مجازی‌سازی
+├── <custom_facts> از /etc/ansible/facts.d/       ← فکت‌های سفارشی
+└── ...
+
+🔹 ۱) فکت‌های پایه سیستم (min)
+ansible_facts['system'] / ansible_system
+
+نوع: string
+مثال: Linux, Windows, Darwin, FreeBSD
+کاربرد فنی: uname -s — تشخیص خانواده سیستم‌عامل در سطح kernel. در شرایط when: ansible_system == "Linux".
+ansible_facts['kernel'] / ansible_kernel
+
+نوع: string
+مثال: 5.15.0-119-generic
+توضیح: uname -r — نسخه کامل هسته. برای تطبیق ماژول کرنل (مثلاً پچ‌های امنیتی) کاربرد دارد.
+ansible_facts['kernel_version']
+
+مثال: #129-Ubuntu SMP ...
+توضیح: uname -v — رشته build هسته (شامل تاریخ build).
+ansible_facts['kernel_release']
+
+همان uname -r (تقریباً معادل kernel).
+ansible_facts['machine']
+
+مثال: x86_64, aarch64, ppc64le
+توضیح: uname -m — معماری ماشین (سخت‌افزار).
+ansible_facts['architecture']
+
+مثال: x86_64 یا arm64 — معماری عمومی (نرمالایز شده).
+ansible_facts['processor_architecture']
+
+مثال: x64 (روی ویندوز)
+ansible_facts['hostname']
+
+مثال: web01
+توضیح: hostname کوتاه (short). از gethostname() یا /proc/sys/kernel/hostname.
+ansible_facts['fqdn']
+
+مثال: web01.example.com
+توضیح: Fully Qualified Domain Name. تلاش می‌کند از DNS/hostname -f استخراج کند. برای SSL و اعتبارسنجی نام‌ها حیاتی.
+ansible_facts['nodename']
+
+uname -n — مشابه hostname کوتاه.
+ansible_facts['domain']
+
+دامنه استخراج‌شده از FQDN (بقیه FQDN پس از نام میزبان).
+ansible_facts['hostname_short']
+
+نام میزبان بدون دامنه.
+ansible_facts['user_id'], ansible_user_id
+
+مثال: root, deploy
+توضیح: نام کاربری که task را اجرا می‌کند (getpass.getuser()).
+ansible_facts['user_uid']
+
+مثال: 0
+توضیح: UID عددی — برای چک‌های دسترسی (مثلاً when: ansible_user_uid == 0).
+ansible_facts['user_gid']
+
+GID اصلی کاربر.
+ansible_facts['user_gecos']
+
+فیلد GECOS (نام کامل کاربر از /etc/passwd).
+ansible_facts['user_dir']
+
+مسیر home کاربر فعلی ($HOME).
+ansible_facts['user_shell']
+
+شل لاگین کاربر (/bin/bash).
+ansible_facts['userspace_bits']
+
+مثال: 64 — تعداد بیت‌های userland (32/64).
+ansible_facts['userspace_architecture']
+
+مثال: x86_64 — معماری فضای کاربر.
+ansible_facts['python'] (dict)
+
+شامل:
+
+    version: {'major': 3, 'minor': 10, 'micro': 12, 'releaselevel': 'final', 'serial': 0}
+
+    version_info: [3, 10, 12, 'final', 0]
+
+    executable: /usr/bin/python3
+
+    has_sslcontext: bool
+
+    type: cpython
+
+ansible_facts['python_version']
+
+مثال: 3.10.12 — برای when: ansible_python_version is version('3.8', '>=').
+ansible_facts['python_executable']
+
+مسیر interpreter پایتون در حال اجرا.
+ansible_facts['system_capabilities']
+
+لیست kernel capabilities مؤثر (از capsh --print).
+ansible_facts['fips_enabled']
+
+bool — آیا FIPS فعال است؟
+🔹 ۲) زمان و تاریخ
+ansible_facts['date_time']
+
+dict شامل:
+
+    year, month, day, hour, minute, second
+
+    epoch: Unix timestamp
+
+    date: 2024-11-10
+
+    time: 13:45:22
+
+    iso8601: 2024-11-10T13:45:22Z
+
+    tz: UTC
+
+    tz_offset: +0000
+
+    weekday, weekday_number
+
+ansible_facts['localtime']
+
+epoch محلی به‌صورت عدد صحیح (deprecated در برخی نسخه‌ها).
+ansible_facts['uptime_seconds']
+
+توضیح: زمان روشن‌بودن سیستم به ثانیه (/proc/uptime). برای reboot scheduling.
+🔹 ۳) توزیع و سیستم‌عامل
+ansible_facts['distribution']
+
+مثال: Ubuntu, Debian, RedHat, CentOS, Rocky, Alpine, Amazon
+توضیح: نام توزیع نرمالایز شده (از /etc/os-release).
+ansible_facts['distribution_version']
+
+مثال: 22.04 — نسخه major.minor.
+ansible_facts['distribution_release']
+
+مثال: jammy (Ubuntu) یا Bookworm (Debian).
+ansible_facts['distribution_major_version']
+
+مثال: 22 — برای شرط‌های نسخه‌ای.
+ansible_facts['distribution_file_variety']
+
+نوع فایل شناساننده (RedHat).
+ansible_facts['distribution_file_path']
+
+مسیر فایل OS release (/etc/os-release).
+ansible_facts['distribution_file_parsed']
+
+bool — آیا فایل با موفقیت parse شد.
+ansible_facts['os_family']
+
+مثال: Debian, RedHat, Suse, Alpine, Windows
+کاربرد فنی: پرکاربردترین فکت در when برای انتخاب package manager:
+yaml
+
+- apt: name=nginx state=present
+  when: ansible_os_family == "Debian"
+
+- yum: name=nginx state=present
+  when: ansible_os_family == "RedHat"
+
+ansible_facts['system']
+
+Linux (uname -s).
+ansible_facts['lsb']
+
+dict شامل:
+
+    id, description, release, codename
+
+    فقط اگر lsb_release نصب باشد (یا از /etc/lsb-release).
+
+ansible_facts['pkg_mgr']
+
+مثال: apt, yum, dnf, zypper, pacman, apk
+توضیح: package manager مؤثر — تشخیص خودکار.
+🔹 ۴) اطلاعات CPU
+ansible_facts['processor'] (deprecated string)
+
+مثال: 0 — تعداد CPUها (رشته!). در نسخه‌های جدید حذف شده.
+ansible_facts['processor_count']
+
+مثال: 4 — تعداد CPUهای فیزیکی (socket).
+ansible_facts['processor_cores']
+
+مثال: 8 — تعداد coreهای فیزیکی.
+ansible_facts['processor_threads_per_core']
+
+مثال: 2 — hyperthreading.
+ansible_facts['processor_vcpus']
+
+مثال: 8 — تعداد vCPU = cores × threads.
+ansible_facts['processor_nproc']
+
+os.cpu_count() — تعداد پردازنده‌های قابل استفاده.
+ansible_facts['cpu'] (لیست)
+
+هر عضو شامل:
+
+    model_name: Intel(R) Xeon(R)...
+
+    architecture: x86_64
+
+    vendor_id: GenuineIntel
+
+    cpu_mhz: 2400.000
+
+    bogo_mips
+
+    flags: لیست ویژگی‌ها (sse4_2, avx2, aes, ...)
+
+    cache_size, physical_id, core_id, cpu_cores, cpu_cores_per_socket
+
+    stepping, microcode, fpu, apicid, initial_apicid
+
+کاربرد فنی: بررسی پشتیبانی AES-NI، AVX2 برای بارهای محاسباتی.
+🔹 ۵) حافظه و Swap
+ansible_facts['memory_mb'] (dict)
+
+    total: 16384
+
+    free: 1024
+
+    used: 15360
+
+    buffers, cached, shared
+
+    nocache: (free پس از کسر cache)
+
+ansible_facts['memtotal_mb'], ansible_facts['memfree_mb']
+
+شورت‌کات‌های پرکاربرد.
+ansible_facts['memtotal_mb']
+
+کل RAM به MB.
+ansible_facts['memory_mb']['nocache']
+
+حافظه آزاد واقعی (بدون buffers/cache).
+ansible_facts['swap'] (dict)
+
+    total, free, used, cached, nocache
+
+ansible_facts['swaptotal_mb'], ansible_facts['swapfree_mb']
+ansible_facts['swaptotal_mb']
+
+برای چک‌های ظرفیت swap.
+🔹 ۶) دیسک‌ها و Mount
+ansible_facts['mounts'] (لیست)
+
+هر عضو:
+
+    mount: نقطه mount (/, /var, /home)
+
+    device: /dev/sda1
+
+    fstype: ext4, xfs, btrfs, tmpfs, nfs
+
+    options: rw,relatime,errors=remount-ro
+
+    size_total, size_available, size_used
+
+    block_size, block_total, block_available, block_used
+
+    inode_total, inode_available, inode_used
+
+کاربرد: بررسی فضای آزاد و انتخاب mount برای ذخیره داده:
+yaml
+
+- debug:
+    msg: "{{ ansible_mounts | selectattr('mount','equalto','/var') | first }}"
+
+ansible_facts['devices'] (dict)
+
+کلید = نام device (sda, sdb, nvme0n1). هر مقدار:
+
+    size: 100.00 GB
+
+    sectors: 209715200
+
+    sectorsize: 512
+
+    model: Samsung SSD 870
+
+    vendor
+
+    host: scsi host 0
+
+    rotational: 0|1 (SSD/HDD)
+
+    partitions (dict): برای هر پارتیشن:
+
+        size, start, sectors, uuid, label, links
+
+کاربرد: پیش از فرمت/پارتیشن، شناسایی دیسک‌ها و SSD بودن.
+🔹 ۷) شبکه
+ansible_facts['hostname'], fqdn, domain — بالا توضیح داده شد.
+ansible_facts['default_ipv4'] / ansible_facts['default_ipv6']
+
+dict شامل:
+
+    address: 192.168.1.10
+
+    gateway: 192.168.1.1
+
+    interface: eth0
+
+    netmask: 255.255.255.0
+
+    network: 192.168.1.0
+
+    broadcast: 192.168.1.255
+
+    mtu
+
+    macaddress
+
+کاربرد فنی: تعیین IP اصلی سرور برای config فایل‌های سرویس، bind آدرس‌ها.
+ansible_facts['interfaces'] (لیست)
+
+مثال: ["lo", "eth0", "docker0"]
+توضیح: نام تمام interfaceهای شبکه.
+ansible_facts['ansible_eth0'] / ansible_facts['eth0'] (dict)
+
+برای هر interface:
+
+    active: bool
+
+    device: نام
+
+    macaddress: آدرس MAC
+
+    mtu
+
+    type: ether, loopback, bridge
+
+    speed: 1000 (Mbps)
+
+    ipv4: dict با address, netmask, broadcast, network
+
+    ipv6: مشابه + scope (link/global)
+
+    features: rx_checksumming, tx_checksumming, ...
+
+ansible_facts['ipv4'] (dict)
+
+تمام IPهای IPv4 سیستم با interface به‌عنوان کلید.
+ansible_facts['ipv6'] (dict)
+
+مشابه برای IPv6.
+ansible_facts['all_ipv4_addresses'] / ansible_facts['all_ipv6_addresses']
+
+لیست تمام IPها (بدون کلید interface). پرکاربرد برای generate cluster config.
+ansible_facts['dns'] (dict)
+
+    nameservers: ["8.8.8.8", "1.1.1.1"]
+
+    search: دامنه‌های search
+
+    domain: دامنه محلی
+
+    options: (در نسخه‌های جدید)
+
+ansible_facts['ansible_fqdn'] — بالاتر.
+ansible_facts['ansible_hostname'] — بالاتر.
+🔹 ۸) مجازی‌سازی
+ansible_facts['virtualization_type']
+
+مثال: kvm, vmware, docker, lxc, xen, virtualbox, hyperv, openvz, rkt, wsl, none
+کاربرد: تنظیم رفتار (مثلاً when: ansible_virtualization_type == "docker").
+ansible_facts['virtualization_role']
+
+مثال: guest, host, none
+ansible_facts['virtualization_tech_guest']
+
+لیست تکنولوژی‌های guest (در صورت تودرتو بودن).
+ansible_facts['virtualization_tech_host']
+
+لیست تکنولوژی‌های host.
+ansible_facts['virtualization_subtype'] (برای docker)
+
+مثال: docker, podman, containerd
+ansible_facts['virtual']
+
+نسخه قدیمی (string).
+ansible_facts['virtual_docker']
+
+dict:
+
+    container_id
+
+    image
+
+    image_name
+
+    image_tag
+
+🔹 ۹) امنیت و SELinux
+ansible_facts['selinux'] (dict)
+
+    status: enabled, disabled
+
+    policy: targeted, mls
+
+    mode: enforcing, permissive
+
+    config_mode
+
+کاربرد: when: ansible_selinux.status == "enabled" — تنظیم context فایل.
+ansible_facts['selinux']['status'] — مثال بالا.
+ansible_facts['security'] — اطلاعات امنیتی (در نسخه‌های جدید).
+ansible_facts['apparmor'] (dict) — وضعیت AppArmor.
+ansible_facts['fips_enabled'] — bool.
+🔹 ۱۰) SSH Host Keys
+ansible_facts['ssh_host_key_rsa_public']
+ansible_facts['ssh_host_key_ecdsa_public']
+ansible_facts['ssh_host_key_ed25519_public']
+ansible_facts['ssh_host_key_dsa_public']
+
+محتویات کلید عمومی میزبان (برای ساخت known_hosts مرکزی).
+🔹 ۱۱) فکت‌های محیطی و kernel cmdline
+ansible_facts['env'] (dict)
+
+همه متغیرهای محیطی (PATH, HOME, USER, LANG, ...).
+ansible_facts['cmdline'] (لیست)
+
+آرگومان‌های kernel (console=tty1, quiet, ...).
+🔹 ۱۲) اطلاعات سخت‌افزار (hardware subset)
+ansible_facts['board_*']
+
+    board_asset_tag, board_name, board_serial, board_vendor, board_version
+
+ansible_facts['bios_*']
+
+    bios_date, bios_vendor, bios_version
+
+ansible_facts['product_*']
+
+    product_name, product_serial, product_uuid, product_vendor, product_version
+
+ansible_facts['system_vendor'], ansible_facts['system_product_name']
+ansible_facts['chassis_*']
+
+    chassis_asset_tag, chassis_serial, chassis_vendor, chassis_version
+
+ansible_facts['form_factor']
+
+مثال: rack, desktop
+ansible_facts['machine_id']
+
+UUID پایدار ماشین (از /etc/machine-id). برای cluster identity.
+ansible_facts['machine_type'] (IBM POWER)
+ansible_facts['processor_*'] — بالا.
+🔹 ۱۳) سرویس‌ها و بسته‌ها
+ansible_facts['service_mgr']
+
+مثال: systemd, upstart, sysvinit, openrc, launchd
+کاربرد: when: ansible_service_mgr == "systemd".
+ansible_facts['services'] (dict)
+
+فقط اگر gather_subset: services فعال باشد:
+هر service:
+
+    name, state, status, source
+
+    started (bool)
+
+⚠️ در سیستم‌های بزرگ گران است.
+ansible_facts['packages'] (dict)
+
+فقط اگر gather_subset: packages فعال باشد (packages در ansible 2.5+ نیاز به فعال‌سازی دستی دارد — گاهی کند است).
+
+    کلید = نام بسته، مقدار = {name, version, release, arch, epoch, source}
+
+🔹 ۱۴) فکت‌های سفارشی (local facts)
+
+از مسیر /etc/ansible/facts.d/*.fact (JSON یا INI یا executable):
+json
+
+// /etc/ansible/facts.d/myapp.fact
+{
+  "version": "1.2.3",
+  "environment": "production"
+}
+
+دسترسی:
+yaml
+
+{{ ansible_facts['local']['myapp']['version'] }}
+# یا
+{{ ansible_local.myapp.version }}
+
+کاربرد: metadata مخصوص سرویس نصب‌شده برای idempotency بین playها.
+🔹 ۱۵) فکت‌های Windows (connection: winrm)
+ansible_facts['os_name']
+
+Microsoft Windows Server 2022 Standard
+ansible_facts['os_version']
+
+10.0.20348
+ansible_facts['os_product_type']
+
+Server یا Workstation
+ansible_facts['os_architecture']
+
+64-bit
+ansible_facts['os_installation_type']
+
+Server / Client
+ansible_facts['windows_domain'], ansible_facts['windows_domain_role']
+ansible_facts['netbios_name']
+
+نام NetBIOS ماشین.
+ansible_facts['powershell_version']
+
+نسخه PowerShell.
+ansible_facts['dotnet_framework_version']
+ansible_facts['installed_hotfixes'] (list)
+
+لیست KBها.
+ansible_facts['ip_addresses'] (Windows-only flat list)
+ansible_facts['processor_*'] (Windows هم مشابه)
+🔹 ۱۶) فکت‌های شبکه‌ای (network appliances – network_cli)
+ansible_facts['net_serialnum']
+ansible_facts['net_version']
+ansible_facts['net_hostname']
+ansible_facts['net_domain']
+ansible_facts['net_all_ipv4_addresses']
+ansible_facts['net_interfaces'] (dict)
+
+    name, macaddress, ipv4, ipv6, mtu, state, type
+
+ansible_facts['net_neighbors'] (LLDP)
+ansible_facts['net_model'], net_sysname, net_sysdesc
+🔹 ۱۷) فکت‌های ابری (پلاگین‌ها – اگر نقش/callback نصب باشد)
+AWS: ansible_facts['amazon'] — نصب پلاگین amazon.aws.aws_ec2 facts:
+
+    instance_id, instance_type, region, availability_zone
+
+    placement, tags, ami_id, security_groups, iam_info
+
+GCP / Azure: مشابه از طریق collectionها.
+🔹 ۱۸) ansible_facts با پیشوند (gather_subset + پلاگین packages)
+ansible_facts['etc_passwd'] (dict) — فقط اگر ماژول getent اجرا شود.
+ansible_facts['systemd'] (با collection systemd)
+⚙️ ۱۹) نکات فنی کلیدی درباره فکت‌ها
+🔸 غیرفعال‌سازی کامل gather (سرعت بالا):
+yaml
+
+- hosts: all
+  gather_facts: no
+  tasks:
+    - setup:
+        gather_subset: min
+      when: need_specific_facts
+
+🔸 دسترسی flat vs nested:
+yaml
+
+ansible_facts['distribution']      # nested (جدید)
+ansible_distribution               # flat (کد قدیمی)
+
+🔸 کش کردن برای اجراهای مکرر:
+ini
+
+[defaults]
+fact_caching = jsonfile
+fact_caching_connection = /var/cache/ansible/facts
+fact_caching_timeout = 86400
+gathering = smart
+
+smart = فقط اگر cache expire شده باشد، collect می‌کند.
+🔸 فیلتر subsets (کاهش هزینه):
+yaml
+
+gather_subset:
+  - "!all"
+  - "!hardware"
+  - "!network"
+  - "min"
+  - "virtual"
+
+🔸 فکت دستی از task:
+yaml
+
+- setup:
+    filter: ansible_*_mb
+- setup:
+    gather_subset:
+      - "!any"
+      - hardware
+
+🔸 لیست کامل مقدار فکت‌ها:
+bash
+
+ansible localhost -m setup
+ansible localhost -m setup -a 'filter=ansible_*ipv4*'
+ansible localhost -m setup -a 'gather_subset=network'
+ansible localhost -m setup -a 'gather_subset=!all,!min,network'
+
+🔸 متغیرهای داخلی/ویژه (magic variables – نه فکت، اما مرتبط):
+
+    inventory_hostname — نام میزبان در inventory (پایدار)
+
+    inventory_hostname_short
+
+    group_names — گروه‌های host
+
+    groups — دیکشنری همه گروه‌ها
+
+    hostvars — دیکشنری همه هاست‌ها/متغیرها
+
+    playbook_dir, inventory_dir
+
+    ansible_play_hosts, ansible_play_batch
+
+    ansible_check_mode, ansible_diff_mode
+
+    ansible_version — نسخه ansible core
+
+    omit — مقدار ویژه برای حذف پارامتر
+
+🔸 اولویت فکت‌ها:
+
+فکت‌ها در گروه all و ungrouped قرار می‌گیرند و پایین‌تر از group_vars, host_vars, play vars, -e هستند. یعنی می‌توان با -e ansible_facts={'distribution':'custom'} تست کرد (توصیه نمی‌شود).
+🔸 inject_facts_as_vars = True:
+
+پیش‌فرض True؛ اگر False شود، فقط ansible_facts['x'] معتبر است — از نام‌گذاری تصادفی در سایر roleها جلوگیری می‌کند (best practice در collections).
+🔸 فکت‌های legacy (deprecated):
+
+    ansible_ssh_host → ansible_host (متغیر، نه فکت)
+
+    ansible_processor → ansible_facts['processor_count']
+
+    ansible_virtualization_type هنوز پایدار است.
+
+📋 ۲۰) خلاصه فکت‌های پرکاربرد در when (Cheat Sheet)
+فکت	کاربرد معمول
+ansible_os_family	انتخاب package manager
+ansible_distribution + ansible_distribution_major_version	انتخاب repo version
+ansible_architecture	دانلود باینری مناسب
+ansible_virtualization_type	تنظیم sysctl/kernel در VM/Container
+ansible_memtotal_mb / ansible_processor_vcpus	تنظیم heap/size سرویس
+ansible_default_ipv4.address	bind کردن سرویس
+ansible_mounts	چک فضای دیسک
+ansible_service_mgr	systemd vs init
+ansible_selinux.status	تنظیم context
+ansible_python_version	انتخاب ماژول سازگار
+ansible_fqdn	certificate CN / server_name
+ansible_date_time.iso8601	timestamp در naming
+ansible_user_id	اجرای privileged-only task
+ansible_env.HOME	مسیرهای کاربر
+ansible_local	metadata مخصوص نصب
+🎯 ۲۱) نمونه Playbook جامع استفاده از فکت‌ها
+yaml
+
+- hosts: all
+  gather_facts: yes
+  gather_subset: [min, hardware, network, virtual]
+
+  tasks:
+    - name: انتخاب repo بر اساس OS
+      set_fact:
+        repo_url: >-
+          {%- if ansible_os_family == 'Debian' -%}
+            deb https://repo.example.com/ubuntu {{ ansible_distribution_release }} main
+          {%- elif ansible_os_family == 'RedHat' -%}
+            https://repo.example.com/el/{{ ansible_distribution_major_version }}/x86_64/
+          {%- endif -%}
+
+    - name: بررسی فضای دیسک
+      assert:
+        that:
+          - (item.size_available / item.size_total) > 0.2
+        fail_msg: "فضای {{ item.mount }} کمتر از 20٪"
+      loop: "{{ ansible_mounts | selectattr('mount', 'in', ['/', '/var']) | list }}"
+
+    - name: تنظیم sysctl فقط روی bare-metal
+      sysctl:
+        name: vm.swappiness
+        value: 10
+      when: ansible_virtualization_type == 'none'
+
+    - name: تنظیم JVM heap بر اساس RAM
+      lineinfile:
+        path: /etc/default/myapp
+        regexp: '^JAVA_HEAP='
+        line: "JAVA_HEAP={{ (ansible_memtotal_mb * 0.5) | int }}m"
+

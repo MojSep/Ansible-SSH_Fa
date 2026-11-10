@@ -1,0 +1,592 @@
+﻿📁 مسیرها و فایل‌های کانفیگ Ansible در لینوکس + جزئیات کامل تنظیمات
+🗂️ ۱) ترتیب اولویت (Precedence) فایل کانفیگ اصلی ansible.cfg
+
+Ansible اولین فایل موجود در این زنجیره را می‌خواند (بالاترین اولویت اول):
+text
+
+1. $ANSIBLE_CONFIG                (متغیر محیطی – بالاترین اولویت)
+2. ./ansible.cfg                  (دایرکتوری جاری / ریشه پروژه)
+3. ~/.ansible.cfg                 (کانفیگ کاربر)
+4. /etc/ansible/ansible.cfg       (کانفیگ سراسری سیستم – پایین‌ترین اولویت)
+
+    ⚠️ سایر تنظیمات از طریق متغیرهای محیطی (ANSIBLE_*) یا آرگومان‌های خط فرمان (-i, -u, --private-key, -e, ...) قابل override هستند که اولویتشان بالاتر از همه است.
+
+🌳 ۲) درخت کامل مسیرها
+text
+
+/etc/
+├── ansible/
+│   ├── ansible.cfg                    # ← کانفیگ سراسری
+│   ├── hosts                          # ← inventory پیش‌فرض (INI)
+│   ├── hosts.yaml / hosts.yml         # ← inventory پیش‌فرض (YAML)
+│   ├── hosts.ini                      # ← inventory پیش‌فرض (INI)
+│   ├── ansible.cfg.bak
+│   ├── roles/                         # ← مسیر پیش‌فرض نقش‌ها
+│   │   └── <role_name>/
+│   ├── group_vars/                    # ← متغیرهای سراسری گروه‌ها
+│   │   └── all.yml
+│   ├── host_vars/                     # ← متغیرهای سراسری هاست‌ها
+│   ├── collections/                   # ← کالکشن‌های سراسری
+│   ├── library/                       # ← ماژول‌های سفارشی سراسری
+│   ├── filter_plugins/
+│   ├── callback_plugins/
+│   ├── connection_plugins/
+│   ├── inventory_plugins/
+│   ├── lookup_plugins/
+│   ├── action_plugins/
+│   ├── vars_plugins/
+│   └── cache_plugins/
+
+~/.ansible/                            # دایرکتوری کاربر (HOME)
+├── cfg                                # (به‌صورت ~/.ansible.cfg هم می‌آید)
+├── cp/                                # ← control_path (سوکت‌های SSH multiplexing)
+├── tmp/                               # ← فایل‌های موقت اجرای ماژول‌ها (ansible-tmp-*)
+├── facts/                             # ← حافظه fact_caching
+│   └── <hostname>
+├── logs/                              # ← محل پیشنهادی log_path
+│   └── ansible.log
+├── roles/                             # ← مسیر نقش‌های نصب‌شده با galaxy
+├── collections/                       # ← کالکشن‌های نصب‌شده با galaxy
+│   └── ansible_collections/
+│       └── <namespace>/<collection>/
+├── galaxy_token                       # ← توکن احراز هویت Galaxy
+└── (ansi kolli) ansi.../              # فایل‌های کمکی ابزارها (نظیر ansible-lint)
+
+~/.ssh/
+├── config                             # ← کانفیگ SSH (مورد استفاده در ssh_args)
+├── known_hosts                        # ← مرتبط با host_key_checking
+└── id_rsa / id_ed25519                # ← کلیدهای SSH
+
+~/                                  (ریشه پروژه – معمول‌ترین محل فایل‌ها)
+├── ansible.cfg                        # ← کانفیگ پروژه (بالاترین اولویت بعد از env)
+├── inventory.ini / hosts              # ← inventory پروژه
+├── inventory/
+│   ├── production/
+│   │   ├── hosts.ini                  # ← inventory تولید
+│   │   ├── group_vars/
+│   │   │   ├── all.yml
+│   │   │   ├── all/                   # ← حالت دایرکتوری (فایل‌های متعدد)
+│   │   │   │   ├── vars.yml
+│   │   │   │   └── vault.yml          # ← رمزنگاری‌شده با ansible-vault
+│   │   │   ├── webservers.yml
+│   │   │   └── dbservers.yml
+│   │   └── host_vars/
+│   │       ├── web01.example.com.yml
+│   │       └── db01.example.com.yml
+│   ├── staging/
+│   └── dynamic/
+│       └── inventory_aws_ec2.yml      # ← inventory داینامیک (پلاگین)
+├── playbooks/
+│   ├── site.yml
+│   ├── deploy.yml
+│   └── ...
+├── roles/
+│   ├── common/
+│   │   ├── tasks/
+│   │   │   ├── main.yml
+│   │   │   └── install.yml
+│   │   ├── handlers/
+│   │   │   └── main.yml
+│   │   ├── templates/
+│   │   │   └── nginx.conf.j2
+│   │   ├── files/
+│   │   ├── vars/
+│   │   │   └── main.yml               # ← متغیرهای با اولویت بالا
+│   │   ├── defaults/
+│   │   │   └── main.yml               # ← متغیرهای با اولویت پایین
+│   │   ├── meta/
+│   │   │   └── main.yml               # ← وابستگی‌ها، galaxy_info
+│   │   ├── library/                   # ← ماژول‌های مخصوص نقش
+│   │   ├── module_utils/
+│   │   ├── filter_plugins/
+│   │   ├── lookup_plugins/
+│   │   ├── tests/
+│   │   │   ├── inventory
+│   │   │   └── test.yml
+│   │   └── README.md
+│   └── ...
+├── group_vars/                        # ← (اگر در ریشه پروژه باشد)
+├── host_vars/
+├── collections/
+│   ├── requirements.yml
+│   └── ansible_collections/
+├── roles/requirements.yml
+├── ansible-navigator.yml              # ← کانفیگ ansible-navigator
+├── ansible-lint.yml / .ansible-lint   # ← کانفیگ linter
+├── .ansible-lint-ignore
+├── inventory.aws_ec2.yml
+├── ansible_vault_password_file        # ← فایل رمز vault
+├── .vault_pass
+└── ansible.log
+
+📄 ۳) فایل اصلی ansible.cfg – تمام بخش‌ها و تنظیمات
+🔹 بخش [defaults] (مهم‌ترین بخش)
+ini
+
+[defaults]
+# مسیر فایل inventory (می‌توان دایرکتوری یا لیست کامایی داد)
+inventory = /etc/ansible/hosts
+inventory_ignore_extensions = .pyc, .pyo, .swp, .bak, ~, .rpm, .md, .txt, .rst, .orig, .ini, .cfg, .retry
+inventory_ignore_patterns = ^\. | ~$ | \.ini$
+inventory_unparsed_failed = true
+
+# کاربر و اتصال پیش‌فرض
+remote_user = root
+remote_port = 22
+transport = smart                  # smart|ssh|paramiko|local
+ask_pass = False
+ask_sudo_pass = False
+ask_su_pass = False
+host_key_checking = False         # (بهتر true – امنیت SSH)
+timeout = 10                      # ثانیه – timeout اتصال
+
+# موازی‌سازی و polling
+forks = 5                         # تعداد هاست‌های موازی (پیش‌فرض 5)
+poll_interval = 15                # فاصله polling برای کارهای async
+
+# fact gathering
+gathering = implicit              # implicit|explicit|smart
+gather_subset = all               # all|min|hardware|network|virtual|ohai|facter
+gather_timeout = 10
+inject_facts_as_vars = True       # دسترسی به ansible_facts به‌صورت top-level vars
+
+# کش کردن fact (سرعت اجرای مکرر)
+fact_caching = memory             # memory|jsonfile|redis|memcached|yaml
+fact_caching_timeout = 86400
+fact_caching_connection = /tmp/ansible_cache
+fact_caching_prefix = ansible_facts
+fact_caching_plugins = jsonfile
+
+# تنظیمات Jinja2
+jinja2_extensions = jinja2.ext.do,jinja2.ext.loopcontrols
+jinja2_native = False
+allow_unsafe_lookups = False
+error_on_undefined_vars = True
+
+# لاگ و خروجی
+log_path = /var/log/ansible.log
+no_log = False                    # ماسک کردن خروجی حساس
+display_skipped_hosts = True
+display_ok_hosts = True
+display_failed_stderr = False
+show_custom_stats = False
+show_task_path_on_failure = False
+stdout_callback = default         # default|minimal|oneline|yaml|json|dense|debug
+callback_whitelist = profile_tasks, timer, mail
+bin_ansible_callbacks = False
+
+# هشدارها
+deprecation_warnings = True
+command_warnings = True
+system_warnings = True
+localhost_warning = True
+action_warnings = True
+
+# امنیت و دسترسی
+allow_world_readable_tmpfiles = False
+sudo_flags = -H -S -n
+hash_behaviour = replace           # replace|merge
+
+# اجرای retry
+retry_files_enabled = False
+retry_files_save_path = ~/.ansible-retry
+
+# interpreter پایتون روی نودهای هدف
+interpreter_python = auto_silent  # auto|auto_silent|auto_legacy|/usr/bin/python3
+ansible_python_interpreter = /usr/bin/python3
+ansible_perl_interpreter = /usr/bin/perl
+
+# پیام ansible_managed (در تمپلیت‌ها)
+ansible_managed = Ansible managed: {file} modified on %Y-%m-%d %H:%M:%S by {uid}@host
+
+# مسیرهای افزونه‌ها
+library            = /usr/share/my_modules:/etc/ansible/library
+module_utils       = /usr/share/my_module_utils
+roles_path         = /etc/ansible/roles:~/.ansible/roles
+collections_path   = ~/.ansible/collections:/usr/share/ansible/collections
+action_plugins     = /usr/share/ansible/plugins/action
+callback_plugins   = /usr/share/ansible/plugins/callback
+connection_plugins = /usr/share/ansible/plugins/connection
+lookup_plugins     = /usr/share/ansible/plugins/lookup
+inventory_plugins  = /usr/share/ansible/plugins/inventory
+vars_plugins       = /usr/share/ansible/plugins/vars
+filter_plugins     = /usr/share/ansible/plugins/filter
+test_plugins       = /usr/share/ansible/plugins/test
+terminal_plugins   = /usr/share/ansible/plugins/terminal
+strategy_plugins   = /usr/share/ansible/plugins/strategy
+cache_plugins      = /usr/share/ansible/plugins/cache
+
+# ansible-doc
+# ansible_managed و doc_fragment_plugins
+doc_fragment_plugins = /usr/share/ansible/plugins/doc_fragments
+
+# collections
+collections_scan_sys_path = True
+
+# وابستگی‌ها و اجرا
+command_warnings = True
+collections_on_ansible_version_mismatch = warning  # warning|error|ignore
+INTERPRETER_PYTHON_FALLBACK = /usr/bin/python3, /usr/bin/python
+
+🔹 بخش [privilege_escalation] (become / sudo / su)
+ini
+
+[privilege_escalation]
+become = True                  # فعال‌سازی پیش‌فرض become در همه taskها
+become_method = sudo           # sudo|su|pbrun|pfexec|doas|dzdo|ksu|runas|machinectl
+become_user = root             # کاربر مقصد
+become_ask_pass = False        # پرسیدن رمز sudo (در صورت نیاز True)
+become_exe = sudo              # مسیر باینری
+become_flags = -H -S -n        # فلگ‌های اضافی
+become_plugin = sudo           # (جدیدتر)
+
+🔹 بخش [ssh_connection] (بهینه‌سازی و امنیت SSH)
+ini
+
+[ssh_connection]
+pipelining = True              # کاهش قابل‌توجه تعداد اتصال‌ها (سرعت بالا)
+pipelining_async = True
+ssh_args = -C -o ControlMaster=auto -o ControlPersist=60s -o PreferredAuthentications=publickey
+ssh_executable = ssh           # مسیر باینری ssh
+ssh_common_args = -o StrictHostKeyChecking=no
+ssh_extra_args =
+control_path = %(directory)s/ansible-ssh-%%h-%%p-%%r    # محل سوکت multiplexing
+control_path_dir = ~/.ansible/cp
+scp_if_ssh = smart             # True|False|smart – استفاده از scp
+sftp_batch_mode = True         # استفاده از sftp به‌جای scp
+ssh_transfer_method = smart    # smart|sftp|scp|piped|dd
+retries = 0                    # تعداد تلاش مجدد
+timeout = 10                   # timeout هر اتصال (ثانیه)
+use_ssh_args = False           # (منسوخ – از ssh_common_args استفاده کن)
+host_key_checking = False
+ssh_retries = 1
+
+🔹 بخش [persistent_connection] (برای شبکه/شبکه‌ای – network_cli, netconf)
+ini
+
+[persistent_connection]
+connection_timeout = 30       # مدت زنده‌بودن اتصال پایدار
+connect_timeout = 30
+command_timeout = 30
+ansible_connection_path = /usr/local/bin
+control_path_dir = ~/.ansible/pc
+
+🔹 بخش [accelerate] (منسوخ – فقط برای سازگاری)
+ini
+
+[accelerate]
+accelerate_port = 5099
+accelerate_timeout = 30
+accelerate_connect_timeout = 5.0
+accelerate_daemon_timeout = 30
+accelerate_multi_key = yes
+
+🔹 بخش [selinux]
+ini
+
+[selinux]
+special_context_filesystems = nfs,vboxsf,fuse,ramfs,mqueue,configfs,glusterfs,sshfs
+libvirt_lxc_noseclabel = True
+
+🔹 بخش [colors] (رنگ‌آمیزی خروجی)
+ini
+
+[colors]
+highlight = white
+verbose = blue
+warn = bright purple
+error = red
+debug = dark gray
+deprecate = purple
+skip = cyan
+unreachable = red
+ok = green
+changed = yellow
+diff_add = green
+diff_remove = red
+diff_lines = cyan
+
+🔹 بخش [diff]
+ini
+
+[diff]
+always = False             # نمایش همیشگی diff
+context = 3                # تعداد خطوط context
+
+🔹 بخش [galaxy] (ansible-galaxy)
+ini
+
+[galaxy]
+server = https://galaxy.ansible.com
+server_list = release_galaxy, automation_hub, my_local
+ignore_certs = False
+role_skeleton = ~/.ansible/roles/skeleton
+role_skeleton_ignore = ^.git$, ^.*/.git_keep$
+display_progress = True       # نمایش نوار پیشرفت دانلود
+
+🔹 بخش [inventory] (پلاگین‌های inventory)
+ini
+
+[inventory]
+enable_plugins = host_list, script, auto, yaml, ini, toml
+ignore_extensions = .pyc, .pyo, .swp, .bak, ~, .rpm, .md, .txt, .rst, .orig, .ini, .cfg, .retry
+ignore_patterns = ^\. | ~$ | \.ini$
+unparsed_is_failed = False
+
+🔹 بخش [paramiko_connection] (اتصال SSH با کتابخانه paramiko)
+ini
+
+[paramiko_connection]
+host_key_auto_add = True
+look_for_keys = True
+pty = True
+record_host_keys = True
+proxy_command = 
+
+🔹 بخش [winrm] (اتصال به ویندوز)
+ini
+
+[winrm]
+kinit_cmd = kinit
+kerberos_delegation = False
+kerberos_hostname_override = 
+kerberos_mode = 
+scheme = http                   # http|https
+transport = plaintext            # plaintext|kerberos|ntlm|credssp
+server_cert_validation = validate  # validate|ignore
+read_timeout_sec = 30
+operation_timeout_sec = 20
+max_file_size = 104857600
+proxy_host = 
+proxy_port = 
+connection_timeout = 30
+
+🔹 بخش [netconf_connection]
+ini
+
+[netconf_connection]
+ssh_config = /etc/ssh/ssh_config
+look_for_keys = False
+
+🔹 بخش [url_lookup] (ماژول lookup url)
+ini
+
+[url_lookup]
+validate_certs = True
+timeout = 10
+
+🔹 بخش [jinja2]
+ini
+
+[jinja2]
+# بخشی از [defaults] است؛ jinja2_extensions در همان‌جا تعریف می‌شود.
+
+🔹 بخش [logging] (در نسخه‌های جدید)
+ini
+
+[logging]
+log_path = /var/log/ansible.log
+log_level = INFO
+
+🔹 بخش [vault] (در نسخه‌های جدید)
+ini
+
+[vault]
+# مسیر پیش‌فرض فایل رمز vault (از طریق --vault-password-file هم داده می‌شود)
+
+🔐 ۴) فایل‌های مهم دیگر و تنظیمات‌شان
+الف) ~/.ansible/galaxy_token
+text
+
+محل: ~/.ansible/galaxy_token
+کاربرد: توکن API سرور Galaxy برای نصب/آپلود نقش‌های خصوصی
+فرمت: یک خط توکن
+دسترسی: chmod 600
+
+ب) ~/.ansible.cfg / ./ansible.cfg
+
+همان بخش‌های ansible.cfg بالا را دارد؛ فقط محل و اولویتش متفاوت است.
+ج) inventory (فایل میزبان‌ها) – سه فرمت اصلی
+ini
+
+# INI
+[webservers]
+web01 ansible_host=10.0.0.1 ansible_user=deploy ansible_ssh_private_key_file=~/.ssh/id_rsa
+web02 ansible_host=10.0.0.2
+
+[webservers:vars]
+http_port=80
+ansible_python_interpreter=/usr/bin/python3
+
+[all:children]
+webservers
+dbservers
+
+yaml
+
+# YAML
+all:
+  children:
+    webservers:
+      hosts:
+        web01:
+          ansible_host: 10.0.0.1
+          ansible_user: deploy
+      vars:
+        http_port: 80
+
+yaml
+
+# Dynamic – پلاگین AWS EC2
+plugin: amazon.aws.aws_ec2
+regions:
+  - us-east-1
+filters:
+  tag:Environment: production
+keyed_groups:
+  - key: tags.Role
+    prefix: role
+
+د) group_vars/all.yml – متغیرهای مشترک همه گروه‌ها
+yaml
+
+ansible_user: deploy
+ansible_python_interpreter: /usr/bin/python3
+ntp_server: time.aliyun.com
+
+هـ) host_vars/<host>.yml
+yaml
+
+ansible_host: 10.0.0.1
+ansible_ssh_private_key_file: /home/deploy/.ssh/id_rsa
+
+و) roles/<role>/meta/main.yml
+yaml
+
+galaxy_info:
+  author: ...
+  description: ...
+  license: MIT
+  min_ansible_version: "2.14"
+  platforms:
+    - name: EL
+      versions: [8, 9]
+  galaxy_tags: [web, nginx]
+dependencies:
+  - role: common
+    vars:
+      some_var: value
+
+ز) roles/<role>/defaults/main.yml vs vars/main.yml
+
+    defaults/main.yml → پایین‌ترین اولویت (به‌راحتی override می‌شود)
+
+    vars/main.yml → اولویت بالا (سختی override می‌شود)
+
+ح) ansible-navigator.yml
+yaml
+
+ansible-navigator:
+  ansible:
+    config: ./ansible.cfg
+    inventory: ./inventory
+  execution-environment:
+    image: quay.io/ansible/creator-ee:latest
+    enabled: true
+  logging:
+    level: info
+    file: /tmp/navigator.log
+
+ط) .ansible-lint
+yaml
+
+profile: production
+exclude_paths:
+  - .cache/
+  - roles/common/files/
+enable_list:
+  - no-changed-when
+skip_list:
+  - yaml[line-length]
+warn_list:
+  - experimental
+
+ی) .vault_pass / ansible_vault_password_file
+text
+
+فایل حاوی رمز برای رمزگشایی فایل‌های ansible-vault (chmod 600)
+اجرا: ansible-playbook --vault-password-file=~/.vault_pass site.yml
+یا متغیر: ANSIBLE_VAULT_PASSWORD_FILE=~/.vault_pass
+
+🌲 ۵) درخت ساختار یک پروژه استاندارد Ansible
+text
+
+project/
+├── ansible.cfg
+├── inventory/
+│   ├── production/hosts.ini
+│   ├── production/group_vars/{all,webservers,dbservers}.yml
+│   ├── production/host_vars/{web01,db01}.yml
+│   └── staging/hosts.ini
+├── playbooks/
+│   ├── site.yml
+│   ├── deploy.yml
+│   └── rotate-keys.yml
+├── roles/
+│   └── nginx/
+│       ├── tasks/main.yml
+│       ├── handlers/main.yml
+│       ├── templates/nginx.conf.j2
+│       ├── files/index.html
+│       ├── vars/main.yml
+│       ├── defaults/main.yml
+│       ├── meta/main.yml
+│       ├── library/
+│       └── tests/
+├── collections/
+│   └── requirements.yml
+├── group_vars/
+├── host_vars/
+├── ansible-navigator.yml
+├── .ansible-lint
+└── .vault_pass (chmod 600)
+
+⚙️ ۶) متغیرهای محیطی مهم (Override)
+متغیر	معادل کانفیگ
+ANSIBLE_CONFIG	مسیر فایل کانفیگ
+ANSIBLE_INVENTORY	inventory
+ANSIBLE_REMOTE_USER	remote_user
+ANSIBLE_PRIVATE_KEY_FILE	private_key_file
+ANSIBLE_SSH_ARGS	ssh_args
+ANSIBLE_TIMEOUT	timeout
+ANSIBLE_FORKS	forks
+ANSIBLE_LOG_PATH	log_path
+ANSIBLE_NOCOLOR	قطع رنگ‌ها
+ANSIBLE_STDOUT_CALLBACK	stdout_callback
+ANSIBLE_HOST_KEY_CHECKING	host_key_checking
+ANSIBLE_VAULT_PASSWORD_FILE	فایل رمز vault
+ANSIBLE_COLLECTIONS_PATH	collections_path
+ANSIBLE_ROLES_PATH	roles_path
+💡 ۷) نکات فنی کلیدی
+
+    host_key_checking = False فقط در تست؛ در محیط واقعی همراه با StrictHostKeyChecking=accept-new و known_hosts مدیریت‌شده استفاده کن.
+
+    pipelining = True روی سرورهای هدف نیاز به requiretty غیرفعال در sudoers دارد (Defaults !requiretty).
+
+    ControlPersist با control_path_dir = ~/.ansible/cp سرعت اجرای چند‌مرحله‌ای را چند برابر می‌کند.
+
+    fact_caching = jsonfile با fact_caching_timeout مناسب، gathering را در اجراهای تکراری تسریع می‌کند.
+
+    اولویت متغیرها (از کم به زیاد): role defaults → inventory group_vars/all → group_vars/* → host_vars/* → play vars → role vars → task vars → extra vars (-e).
+
+    ansible-config برای دیباگ کانفیگ:
+
+        ansible-config dump — نمایش کل مقادیر مؤثر
+
+        ansible-config dump --only-changed — فقط مقادیر تغییر‌یافته
+
+        ansible-config view — نمایش ansible.cfg فعلی
+
+        ansible-config list — لیست همه تنظیمات با توضیح
+
+    ansible-inventory --graph برای بررسی ساختار درختی inventory.

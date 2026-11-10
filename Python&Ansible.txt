@@ -1,0 +1,3439 @@
+﻿🐍 استفاده حرفه‌ای از Python در مدیریت Ansible و کنترل محیط‌های عملیاتی
+
+    این مرجع بر اساس تجربه واقعی تیم‌های DevOps/SRE است. هر بخش شامل کد کامل + توضیح فنی + سناریو استفاده + بهترین شیوه‌ها است.
+
+📑 فهرست
+text
+
+۱.  چرا Python + Ansible؟
+۲.  ansible-runner (API اصلی)
+۳.  ansible-core API مستقیم
+۴.  اجرای موازی (Parallel)
+۵.  Custom Module
+۶.  Custom Filter/Lookup Plugin
+۷.  Custom Callback Plugin
+۸.  Dynamic Inventory Script
+۹.  اسکریپت روزانه: Health Check
+۱۰. اسکریپت روزانه: Deploy Automation
+۱۱. اسکریپت روزانه: Rollback Automation
+۱۲. اسکریپت روزانه: Incident Response
+۱۳. اسکریپت هفتگی: Compliance Audit
+۱۴. اسکریپت هفتگی: Capacity Report
+۱۵. اسکریپت هفتگی: Patch Management
+۱۶. اسکریپت هفتگی: Cost Optimization
+۱۷. FastAPI Server (REST API روی Ansible)
+۱۸. Celery + Redis (Job Queue)
+۱۹. Webhook Integration
+۲۰. Parsing output و Metrics
+۲۱. Testing (pytest-ansible)
+۲۲. Security Best Practices
+
+۱️⃣ چرا Python + Ansible؟
+محدودیت‌های CLI خالص
+bash
+
+# ❌ این‌ها را نمی‌توانی با CLI به‌راحتی انجام دهی:
+# - گرفتن خروجی ساختاریافته و ذخیره در DB
+# - اجرای هزار playbook با پارامترهای متفاوت
+# - پاسخ HTTP/Webhook به trigger
+# - مقایسه نتایج دو اجرا
+# - Trigger خودکار بر اساس metric
+# - اجرای async + polling
+# - ترکیب با AWS boto3 API
+
+چه زمانی Python؟
+سناریو	CLI	Python
+اجرای دستی playbook	✅	overkill
+CI/CD pipeline	✅ (بهتر)	✅
+REST API روی Ansible	❌	✅
+Job Queue (Celery)	❌	✅
+Parsing نتایج به DB	❌	✅
+Dynamic logic بین taskها	محدود	✅
+Custom module	❌	✅
+Multi-runner orchestrator	❌	✅
+Webhook listener	❌	✅
+۲️⃣ ansible-runner — API اصلی
+نصب
+bash
+
+pip install ansible-runner
+
+۲.۱ ساده‌ترین اجرا
+python
+
+# run_playbook.py
+import ansible_runner
+import json
+
+# ساختار پروژه:
+# project/
+# ├── project/            ← private_data_dir
+# │   ├── inventory/
+# │   ├── project/
+# │   │   └── site.yml    ← playbook
+# │   └── env/
+# │       ├── envvars
+# │       └── extravars
+
+r = ansible_runner.run(
+    private_data_dir='/opt/ansible/project',
+    playbook='site.yml',
+    inventory='/etc/ansible/inventory/production',
+    limit='webservers',
+    extravars={'app_version': '1.2.3', 'env': 'prod'},
+)
+
+print(f"Status: {r.status}")   # successful | failed | canceled | timeout
+print(f"RC:     {r.rc}")       # 0 = ok
+print(f"Stats:  {r.stats}")    # {'ok': 10, 'changed': 5, 'failures': 0, ...}
+
+# خروجی کامل
+for event in r.events:
+    print(event.get('event'), event.get('task'))
+
+۲.۲ با callback زنده (streaming)
+python
+
+# streaming.py
+import ansible_runner
+
+def event_handler(event):
+    """callback برای هر event"""
+    event_type = event.get('event')
+    
+    if event_type == 'playbook_on_start':
+        print(f"▶️  Playbook: {event.get('playbook')}")
+    
+    elif event_type == 'playbook_on_play_start':
+        print(f"\n🎬 Play: {event.get('play', {}).get('name')}")
+    
+    elif event_type == 'playbook_on_task_start':
+        print(f"  ▶ {event.get('task', {}).get('name')}")
+    
+    elif event_type == 'runner_on_ok':
+        host = event.get('event_data', {}).get('host')
+        result = event.get('event_data', {}).get('res', {})
+        status = "changed" if result.get('changed') else "ok"
+        print(f"    ✅ [{host}] {status}")
+    
+    elif event_type == 'runner_on_failed':
+        host = event.get('event_data', {}).get('host')
+        msg = event.get('event_data', {}).get('res', {}).get('msg', '')
+        print(f"    ❌ [{host}] {msg}")
+    
+    elif event_type == 'runner_on_unreachable':
+        host = event.get('event_data', {}).get('host')
+        print(f"    🔌 [{host}] UNREACHABLE")
+    
+    elif event_type == 'playbook_on_stats':
+        stats = event.get('event_data', {})
+        print(f"\n📊 Stats: {stats}")
+
+r = ansible_runner.run(
+    private_data_dir='/opt/ansible/project',
+    playbook='site.yml',
+    event_handler=event_handler,
+)
+
+if r.rc != 0:
+    raise SystemExit(f"Playbook failed with rc={r.rc}")
+
+۲.۳ کنترل کامل (envvars + extravars + vault)
+python
+
+# controlled_run.py
+import ansible_runner
+import os
+
+envvars = {
+    'ANSIBLE_CONFIG': '/etc/ansible/ansible.cfg',
+    'ANSIBLE_VAULT_PASSWORD_FILE': '/etc/ansible/.vault_pass',
+    'ANSIBLE_HOST_KEY_CHECKING': 'True',
+    'ANSIBLE_STDOUT_CALLBACK': 'json',   # یا yaml
+    'ANSIBLE_FORKS': '20',
+    'ANSIBLE_TIMEOUT': '30',
+    'ANSIBLE_LOG_PATH': '/var/log/ansible/api-runner.log',
+    'ANSIBLE_COLLECTIONS_PATH': '/etc/ansible/collections',
+}
+
+extravars = {
+    'app_version': os.environ.get('APP_VERSION', 'latest'),
+    'deploy_env': 'production',
+    'rollback_allowed': False,
+}
+
+cmdline = '--syntax-check'  # یا '--check --diff' برای dry-run
+
+r = ansible_runner.run(
+    private_data_dir='/opt/ansible/project',
+    playbook='deploy.yml',
+    inventory='/etc/ansible/inventory/production',
+    limit=os.environ.get('DEPLOY_HOSTS', 'all'),
+    extravars=extravars,
+    envvars=envvars,
+    cmdline=cmdline,
+    quiet=False,
+    verbosity=1,
+    timeout=1800,   # 30 دقیقه hard limit
+    rotate_artifacts=5,   # حفظ ۵ artifact آخر
+)
+
+if r.status == 'successful':
+    print(f"✅ Deployed {extravars['app_version']}")
+    print(f"Artifacts: {r.artifact_dir}")
+else:
+    print(f"❌ Failed: {r.status}")
+    # خواندن آخرین stdout
+    with open(os.path.join(r.artifact_dir, 'stdout'), 'r') as f:
+        print(f.read()[-2000:])
+
+۲.۴ ساختار private_data_dir (مهم!)
+text
+
+/opt/ansible/project/
+├── inventory/                 ← if not absolute path in run()
+│   └── hosts.yml
+├── project/                   ← playbooks
+│   ├── site.yml
+│   └── deploy.yml
+├── roles/                     ← roles (symlink یا copy)
+├── collections/
+│   └── ansible_collections/
+├── env/
+│   ├── envvars                ← variables محیزی (KEY=VALUE)
+│   ├── extravars              ← JSON اضافی
+│   ├── settings               ← ansible-runner settings
+│   ├── ssh_key                ← کلید SSH اختصاصی
+│   └── passwords/             ← vault passwords
+└── artifacts/                 ← output (خودکار ساخته می‌شود)
+    └── <uuid>/
+        ├── stdout
+        ├── stderr
+        ├── rc
+        ├── status
+        └── job_events/
+            └── *.json         ← events
+
+۲.۵ خواندن artifact (برای audit)
+python
+
+# read_artifact.py
+import json
+from pathlib import Path
+
+def parse_artifact(artifact_dir: str) -> dict:
+    """parse output کامل یک اجرا"""
+    base = Path(artifact_dir)
+    
+    result = {
+        'status': (base / 'status').read_text().strip(),
+        'rc': int((base / 'rc').read_text().strip()),
+        'stats': {},
+        'tasks': [],
+        'failures': [],
+    }
+    
+    # Parse events
+    for event_file in (base / 'job_events').glob('*.json'):
+        event = json.loads(event_file.read_text())
+        event_type = event.get('event')
+        
+        if event_type == 'playbook_on_stats':
+            result['stats'] = event['event_data']
+        
+        elif event_type == 'runner_on_ok':
+            data = event.get('event_data', {})
+            result['tasks'].append({
+                'host': data.get('host'),
+                'task': data.get('task'),
+                'changed': data.get('res', {}).get('changed', False),
+            })
+        
+        elif event_type == 'runner_on_failed':
+            data = event.get('event_data', {})
+            result['failures'].append({
+                'host': data.get('host'),
+                'task': data.get('task'),
+                'msg': data.get('res', {}).get('msg', ''),
+            })
+    
+    return result
+
+# استفاده
+info = parse_artifact('/opt/ansible/project/artifacts/abc-123')
+print(json.dumps(info, indent=2))
+
+# ذخیره در DB
+# import psycopg2
+# cur.execute("INSERT INTO deploys (status, stats, failures) VALUES (%s, %s, %s)",
+#             (info['status'], json.dumps(info['stats']), json.dumps(info['failures'])))
+
+۳️⃣ ansible-core API مستقیم (Level پایین‌تر)
+
+    ⚠️ این API ناپایدار است و بین نسخه‌ها تغییر می‌کند. توصیه: از ansible-runner استفاده کن مگر نیاز خاص.
+
+python
+
+# direct_api.py
+from ansible.parsing.dataloader import DataLoader
+from ansible.inventory.manager import InventoryManager
+from ansible.vars.manager import VariableManager
+from ansible.playbook import Playbook
+from ansible.executor.playbook_executor import PlaybookExecutor
+from ansible.utils.display import Display
+import os
+
+# ۱. Loader
+loader = DataLoader()
+
+# ۲. Inventory
+inventory = InventoryManager(loader=loader, sources=['/etc/ansible/inventory/production'])
+
+# ۳. Variables
+variable_manager = VariableManager(loader=loader, inventory=inventory)
+
+# ۴. Playbook
+playbook = Playbook.load(
+    '/opt/ansible/project/project/site.yml',
+    variable_manager=variable_manager,
+    loader=loader,
+)
+
+# ۵. Executor (Level بسیار پایین — معمولاً لازم نیست)
+# از ansible-runner استفاده کن
+
+۳.۱ اجرای ad-hoc module از Python
+python
+
+# adhoc.py
+import ansible_runner
+
+# معادل: ansible web01 -m ping
+r = ansible_runner.run(
+    private_data_dir='/tmp/runner',
+    host_pattern='web01',
+    module='ping',
+    inventory='/etc/ansible/inventory',
+    envvars={'ANSIBLE_HOST_KEY_CHECKING': 'True'},
+)
+
+# معادل: ansible all -m command -a "uptime"
+r = ansible_runner.run(
+    private_data_dir='/tmp/runner',
+    host_pattern='all',
+    module='command',
+    module_args='uptime',
+    inventory='/etc/ansible/inventory',
+)
+
+# خواندن result
+for event in r.events:
+    if event.get('event') == 'runner_on_ok':
+        host = event['event_data']['host']
+        result = event['event_data']['res']
+        print(f"{host}: {result.get('stdout', '')}")
+
+۳.۲ اجرای command سریع (بدون playbook)
+python
+
+# quick_command.py
+import ansible_runner
+
+def run_command(hosts: str, cmd: str, become: bool = False) -> dict:
+    """اجرای shell command روی hosts"""
+    r = ansible_runner.run(
+        private_data_dir='/tmp/runner',
+        host_pattern=hosts,
+        module='command',
+        module_args=cmd,
+        inventory='/etc/ansible/inventory',
+        envvars={
+            'ANSIBLE_HOST_KEY_CHECKING': 'True',
+            'ANSIBLE_STDOUT_CALLBACK': 'json',
+        },
+        # become
+        cmdline='-b' if become else '',
+    )
+    
+    results = {}
+    for event in r.events:
+        if event.get('event') == 'runner_on_ok':
+            data = event['event_data']
+            results[data['host']] = {
+                'rc': data['res'].get('rc', 0),
+                'stdout': data['res'].get('stdout', ''),
+                'stderr': data['res'].get('stderr', ''),
+            }
+        elif event.get('event') == 'runner_on_failed':
+            data = event['event_data']
+            results[data['host']] = {
+                'error': data['res'].get('msg', 'unknown'),
+            }
+    
+    return results
+
+# استفاده
+result = run_command('webservers', 'df -h /', become=False)
+for host, info in result.items():
+    print(f"{host}: {info.get('stdout', info.get('error'))}")
+
+۴️⃣ اجرای موازی (Parallel Execution)
+۴.۱ چند playbook همزمان با threading
+python
+
+# parallel_runs.py
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import ansible_runner
+import os
+
+def deploy_host(host: str, version: str) -> dict:
+    """deploy روی یک هاست"""
+    r = ansible_runner.run(
+        private_data_dir='/opt/ansible/project',
+        playbook='deploy.yml',
+        inventory='/etc/ansible/inventory',
+        limit=host,
+        extravars={'app_version': version, 'env': 'prod'},
+        quiet=True,
+        timeout=1800,
+    )
+    return {
+        'host': host,
+        'status': r.status,
+        'rc': r.rc,
+        'artifact': r.artifact_dir,
+    }
+
+def deploy_all(hosts: list, version: str, concurrency: int = 5) -> list:
+    """deploy با concurrency محدود"""
+    results = []
+    
+    with ThreadPoolExecutor(max_workers=concurrency) as executor:
+        futures = {
+            executor.submit(deploy_host, host, version): host
+            for host in hosts
+        }
+        
+        for future in as_completed(futures):
+            host = futures[future]
+            try:
+                result = future.result(timeout=1900)
+                results.append(result)
+                
+                icon = "✅" if result['status'] == 'successful' else "❌"
+                print(f"{icon} {host}: {result['status']}")
+            except Exception as e:
+                print(f"❌ {host}: exception {e}")
+                results.append({'host': host, 'status': 'error', 'error': str(e)})
+    
+    return results
+
+# استفاده
+hosts = ['web01', 'web02', 'web03', 'web04', 'web05']
+results = deploy_all(hosts, version='1.2.3', concurrency=3)
+
+# گزارش
+failed = [r for r in results if r['status'] != 'successful']
+if failed:
+    print(f"\n❌ Failed hosts: {[r['host'] for r in failed]}")
+    exit(1)
+
+۴.۲ asyncio-based (برای API server)
+python
+
+# async_deploy.py
+import asyncio
+import ansible_runner
+from concurrent.futures import ThreadPoolExecutor
+
+# ansible-runner sync است → از thread pool استفاده کن
+executor = ThreadPoolExecutor(max_workers=10)
+
+async def async_deploy(host: str, version: str) -> dict:
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(
+        executor,
+        lambda: ansible_runner.run(
+            private_data_dir='/opt/ansible/project',
+            playbook='deploy.yml',
+            limit=host,
+            extravars={'app_version': version},
+            quiet=True,
+        )
+    )
+
+async def deploy_all_async(hosts: list, version: str) -> list:
+    tasks = [async_deploy(h, version) for h in hosts]
+    return await asyncio.gather(*tasks, return_exceptions=True)
+
+# استفاده
+async def main():
+    hosts = [f'web0{i}' for i in range(1, 11)]
+    results = await deploy_all_async(hosts, '1.2.3')
+    for host, result in zip(hosts, results):
+        if isinstance(result, Exception):
+            print(f"❌ {host}: {result}")
+        else:
+            print(f"✅ {host}: {result.status}")
+
+# asyncio.run(main())
+
+۴.۳ محدود کردن forks (حیاتی)
+python
+
+# هر ansible_runner.run با N forks اجرا می‌شود.
+# در parallel، این‌ها ضرب می‌شوند!
+# 5 threads × 20 forks = 100 concurrent SSH → خطرناک
+
+# راه‌حل: forks کم + threads کم
+envvars = {
+    'ANSIBLE_FORKS': '5',   # هر runner
+}
+
+# و concurrency = 5
+# → 5 × 5 = 25 concurrent (manageable)
+
+۵️⃣ Custom Module (پایتون خالص)
+۵.۱ ساختار
+text
+
+library/
+└── my_custom_module.py
+
+python
+
+#!/usr/bin/python
+# library/my_custom_module.py
+from ansible.module_utils.basic import AnsibleModule
+
+DOCUMENTATION = r'''
+---
+module: my_custom_module
+short_description: Manage custom app
+description:
+  - Idempotent custom app management
+options:
+  name:
+    description: App name
+    required: true
+    type: str
+  version:
+    description: Version
+    required: false
+    type: str
+    default: "latest"
+  state:
+    description: desired state
+    choices: [present, absent, latest]
+    default: present
+    type: str
+'''
+
+EXAMPLES = r'''
+- name: Install app
+  my_custom_module:
+    name: myapp
+    version: "1.2.3"
+    state: present
+'''
+
+RETURN = r'''
+version:
+  description: installed version
+  type: str
+  returned: always
+'''
+
+def get_installed_version(name: str) -> str:
+    """خواندن نسخه نصب‌شده از filesystem"""
+    import os
+    path = f'/opt/{name}/.version'
+    if not os.path.exists(path):
+        return None
+    with open(path) as f:
+        return f.read().strip()
+
+def install_app(name: str, version: str) -> tuple:
+    """نصب app — return (changed, msg)"""
+    import subprocess
+    cmd = ['/usr/local/bin/install-app', '--name', name, '--version', version]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    return (result.returncode == 0, result.stdout + result.stderr)
+
+def main():
+    module = AnsibleModule(
+        argument_spec=dict(
+            name=dict(type='str', required=True),
+            version=dict(type='str', default='latest'),
+            state=dict(type='str', default='present', choices=['present', 'absent', 'latest']),
+        ),
+        supports_check_mode=True,   # ← مهم!
+    )
+    
+    name = module.params['name']
+    version = module.params['version']
+    state = module.params['state']
+    
+    current = get_installed_version(name)
+    changed = False
+    msg = ''
+    
+    # Check mode (dry-run)
+    if module.check_mode:
+        if state == 'absent' and current:
+            module.exit_json(changed=True, msg=f"Would remove {name}")
+        elif state == 'present' and current != version:
+            module.exit_json(changed=True, msg=f"Would install {name}-{version}")
+        module.exit_json(changed=False, msg=f"{name} is {state}")
+    
+    # Real execution
+    if state == 'absent':
+        if current:
+            import os, shutil
+            shutil.rmtree(f'/opt/{name}', ignore_errors=True)
+            changed = True
+            msg = f"Removed {name}"
+    
+    elif state in ('present', 'latest'):
+        if state == 'latest':
+            version = 'latest'   # install-app handles it
+        
+        if current != version:
+            success, output = install_app(name, version)
+            if not success:
+                module.fail_json(msg=f"Install failed: {output}")
+            changed = True
+            msg = f"Installed {name}-{version}"
+    
+    module.exit_json(
+        changed=changed,
+        msg=msg,
+        version=get_installed_version(name),
+    )
+
+if __name__ == '__main__':
+    main()
+
+۵.۲ استفاده
+yaml
+
+- name: install app
+  my_custom_module:
+    name: myapp
+    version: "1.2.3"
+    state: present
+  register: result
+
+- debug: var=result.version
+
+۵.۳ Test
+python
+
+# tests/test_module.py
+# با pytest-ansible
+import pytest
+
+def test_install(host):
+    result = host.run('python3 /tmp/my_custom_module.py \'{"ANSIBLE_MODULE_ARGS":{"name":"testapp","version":"1.0"}}\'')
+    assert '"changed": true' in result.stdout
+
+def test_idempotent(host):
+    # دو بار → بار دوم changed=False
+    host.run('python3 /tmp/my_custom_module.py \'{"ANSIBLE_MODULE_ARGS":{"name":"testapp","version":"1.0"}}\'')
+    result = host.run('python3 /tmp/my_custom_module.py \'{"ANSIBLE_MODULE_ARGS":{"name":"testapp","version":"1.0"}}\'')
+    assert '"changed": false' in result.stdout
+
+۶️⃣ Custom Filter/Lookup Plugin
+۶.۱ Filter Plugin
+python
+
+# filter_plugins/custom_filters.py
+class FilterModule:
+    def filters(self):
+        return {
+            'nginx_upstreams': self.nginx_upstreams,
+            'b64_to_json': self.b64_to_json,
+            'mask_secrets': self.mask_secrets,
+            'docker_tag': self.docker_tag,
+        }
+
+    def nginx_upstreams(self, hosts: list) -> str:
+        """تبدیل لیست هاست‌ها به upstream nginx"""
+        lines = []
+        for i, host in enumerate(hosts):
+            lines.append(f'    server {host}:8080 max_fails=3 fail_timeout=10s;')
+        return '\n'.join(lines)
+
+    def b64_to_json(self, b64_str: str) -> dict:
+        """decode base64 + parse JSON"""
+        import base64, json
+        return json.loads(base64.b64decode(b64_str))
+
+    def mask_secrets(self, text: str) -> str:
+        """ماسک کردن secret در لاگ"""
+        import re
+        patterns = [
+            (r'(password|passwd|pwd)[=:]\s*[^\s,]+', r'\1=***'),
+            (r'(token|key|secret)[=:]\s*[^\s,]+', r'\1=***'),
+            (r'Bearer\s+[A-Za-z0-9\-._~+/]+=*', 'Bearer ***'),
+        ]
+        for pattern, replacement in patterns:
+            text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+        return text
+
+    def docker_tag(self, version: str, env: str) -> str:
+        """compute docker tag"""
+        # 1.2.3 + prod → 1.2.3-prod
+        # 1.2.3 + staging → 1.2.3-rc
+        suffix = {'prod': 'prod', 'staging': 'rc', 'dev': 'dev'}.get(env, 'latest')
+        return f"{version}-{suffix}"
+
+استفاده:
+yaml
+
+- template:
+    src: nginx.conf.j2
+    dest: /etc/nginx/nginx.conf
+  vars:
+    upstreams: "{{ groups['webservers'] | nginx_upstreams }}"
+
+- debug:
+    msg: "{{ log_line | mask_secrets }}"
+
+۶.۲ Lookup Plugin
+python
+
+# lookup_plugins/aws_secret.py
+from ansible.plugins.lookup import LookupBase
+import boto3
+
+class LookupModule(LookupBase):
+    def run(self, terms, variables=None, **kwargs):
+        """
+        terms: لیست secret_id ها
+        return: لیست value ها
+        """
+        region = kwargs.get('region', 'us-east-1')
+        client = boto3.client('secretsmanager', region_name=region)
+        
+        results = []
+        for secret_id in terms:
+            try:
+                response = client.get_secret_value(SecretId=secret_id)
+                results.append(response['SecretString'])
+            except client.exceptions.ResourceNotFoundException:
+                raise Exception(f"Secret not found: {secret_id}")
+        
+        return results
+
+استفاده:
+yaml
+
+- name: get db password
+  set_fact:
+    db_password: "{{ lookup('aws_secret', 'prod/db/password', region='us-east-1') }}"
+  no_log: true
+
+۶.۳ Combo: Filter + Lookup
+python
+
+# lookup_plugins/vault_kv.py
+from ansible.plugins.lookup import LookupBase
+import requests
+import os
+
+class LookupModule(LookupBase):
+    def run(self, terms, variables=None, **kwargs):
+        """دریافت secret از HashiCorp Vault"""
+        vault_addr = kwargs.get('vault_addr') or os.environ['VAULT_ADDR']
+        vault_token = kwargs.get('vault_token') or os.environ['VAULT_TOKEN']
+        mount = kwargs.get('mount', 'secret')
+        
+        headers = {'X-Vault-Token': vault_token}
+        results = []
+        
+        for path in terms:
+            url = f"{vault_addr}/v1/{mount}/data/{path}"
+            r = requests.get(url, headers=headers, timeout=10)
+            r.raise_for_status()
+            results.append(r.json()['data']['data'])
+        
+        return results
+
+استفاده:
+yaml
+
+- name: get db credentials
+  set_fact:
+    db_creds: "{{ lookup('vault_kv', 'apps/prod/db', mount='secret') }}"
+  no_log: true
+
+- name: use credentials
+  community.mysql.mysql_user:
+    name: "{{ db_creds.username }}"
+    password: "{{ db_creds.password }}"
+  no_log: true
+
+۷️⃣ Custom Callback Plugin
+python
+
+# callback_plugins/prometheus.py
+from ansible.plugins.callback import CallbackBase
+from prometheus_client import Counter, Histogram, Gauge
+import time
+import os
+
+TASK_COUNT = Counter(
+    'ansible_task_total',
+    'Total tasks executed',
+    ['status', 'playbook', 'play']
+)
+TASK_DURATION = Histogram(
+    'ansible_task_duration_seconds',
+    'Task execution duration',
+    ['task']
+)
+HOSTS_BY_STATUS = Gauge(
+    'ansible_hosts_by_status',
+    'Hosts by status',
+    ['status']
+)
+
+class CallbackModule(CallbackBase):
+    CALLBACK_VERSION = 2.0
+    CALLBACK_TYPE = 'aggregate'
+    CALLBACK_NAME = 'prometheus'
+    CALLBACK_NEEDS_WHITELIST = True
+
+    def __init__(self):
+        super().__init__()
+        self._playbook = None
+        self._play = None
+        self._task_start = {}
+
+    def v2_playbook_on_start(self, playbook):
+        self._playbook = os.path.basename(playbook._file_name)
+
+    def v2_playbook_on_play_start(self, play):
+        self._play = play.get_name()
+
+    def v2_playbook_on_task_start(self, task, is_conditional):
+        self._task_start[task._uuid] = time.time()
+
+    def _duration(self, task):
+        start = self._task_start.pop(task._uuid, None)
+        if start:
+            TASK_DURATION.labels(task=task.get_name()).observe(time.time() - start)
+
+    def v2_runner_on_ok(self, result):
+        self._duration(result._task)
+        TASK_COUNT.labels(
+            status='ok',
+            playbook=self._playbook,
+            play=self._play
+        ).inc()
+
+    def v2_runner_on_failed(self, result, ignore_errors=False):
+        self._duration(result._task)
+        status = 'ignored' if ignore_errors else 'failed'
+        TASK_COUNT.labels(
+            status=status,
+            playbook=self._playbook,
+            play=self._play
+        ).inc()
+
+    def v2_runner_on_unreachable(self, result):
+        TASK_COUNT.labels(
+            status='unreachable',
+            playbook=self._playbook,
+            play=self._play
+        ).inc()
+
+    def v2_runner_on_skipped(self, result):
+        TASK_COUNT.labels(
+            status='skipped',
+            playbook=self._playbook,
+            play=self._play
+        ).inc()
+
+فعال‌سازی:
+ini
+
+# ansible.cfg
+[defaults]
+callbacks_enabled = prometheus
+callback_plugins = /etc/ansible/callback_plugins
+
+۸️⃣ Dynamic Inventory Script
+۸.۱ ساده (executable script)
+python
+
+#!/usr/bin/env python3
+# inventory/dynamic_inventory.py
+"""
+Dynamic inventory from internal CMDB.
+Usage: ./dynamic_inventory.py --list
+       ./dynamic_inventory.py --host <hostname>
+"""
+import json
+import sys
+import argparse
+import requests
+
+CMDB_API = 'https://cmdb.internal/api/v1'
+
+def get_servers():
+    r = requests.get(f'{CMDB_API}/servers', timeout=10)
+    r.raise_for_status()
+    return r.json()
+
+def build_inventory(servers: list) -> dict:
+    inventory = {
+        '_meta': {'hostvars': {}},
+    }
+    
+    for srv in servers:
+        host = srv['hostname']
+        group = srv['role']           # webserver, db, cache
+        env = srv['environment']      # prod, staging
+        
+        # گروه‌ها: role و env
+        inventory.setdefault(group, {'hosts': []})
+        inventory.setdefault(env, {'hosts': []})
+        inventory[group]['hosts'].append(host)
+        inventory[env]['hosts'].append(host)
+        
+        # hostvars
+        inventory['_meta']['hostvars'][host] = {
+            'ansible_host': srv['ip'],
+            'ansible_user': 'deploy',
+            'ansible_ssh_private_key_file': '/etc/ansible/keys/deploy',
+            'environment': env,
+            'role': group,
+            'tags': srv.get('tags', {}),
+        }
+    
+    # Composite groups
+    for role in ['webserver', 'db', 'cache']:
+        for env in ['prod', 'staging']:
+            group_name = f'{role}_{env}'
+            hosts = [
+                h for h, v in inventory['_meta']['hostvars'].items()
+                if v['role'] == role and v['environment'] == env
+            ]
+            if hosts:
+                inventory[group_name] = {'hosts': hosts}
+    
+    return inventory
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--list', action='store_true')
+    parser.add_argument('--host', help='Get host variables')
+    args = parser.parse_args()
+    
+    if args.list:
+        servers = get_servers()
+        print(json.dumps(build_inventory(servers), indent=2))
+    elif args.host:
+        servers = get_servers()
+        inventory = build_inventory(servers)
+        hostvars = inventory['_meta']['hostvars'].get(args.host, {})
+        print(json.dumps(hostvars, indent=2))
+    else:
+        parser.print_help()
+        sys.exit(1)
+
+if __name__ == '__main__':
+    main()
+
+bash
+
+chmod +x inventory/dynamic_inventory.py
+ansible-inventory -i inventory/dynamic_inventory.py --list
+
+۸.۲ به‌صورت Plugin (بهتر)
+python
+
+# inventory_plugins/cmdb.py
+from ansible.plugins.inventory import BaseInventoryPlugin
+from ansible.errors import AnsibleError
+import requests
+
+DOCUMENTATION = '''
+name: cmdb
+plugin_type: inventory
+short_description: CMDB inventory
+options:
+  plugin:
+    required: true
+    choices: ['cmdb']
+  api_url:
+    required: true
+    type: str
+'''
+
+class InventoryModule(BaseInventoryPlugin):
+    NAME = 'cmdb'
+
+    def verify_file(self, path):
+        if path.endswith(('cmdb.yml', 'cmdb.yaml')):
+            return True
+        return False
+
+    def parse(self, inventory, loader, path, cache=True):
+        super().parse(inventory, loader, path)
+        self._read_config_data(path)
+        
+        api_url = self.get_option('api_url')
+        try:
+            r = requests.get(f'{api_url}/servers', timeout=10)
+            r.raise_for_status()
+        except Exception as e:
+            raise AnsibleError(f"CMDB API failed: {e}")
+        
+        for srv in r.json():
+            host = srv['hostname']
+            
+            # Groups
+            self.inventory.add_host(host)
+            self.inventory.add_group(srv['role'])
+            self.inventory.add_child(srv['role'], host)
+            
+            self.inventory.add_group(srv['environment'])
+            self.inventory.add_child(srv['environment'], host)
+            
+            # Vars
+            self.inventory.set_variable(host, 'ansible_host', srv['ip'])
+            self.inventory.set_variable(host, 'ansible_user', 'deploy')
+
+استفاده:
+yaml
+
+# inventory/prod.cmdb.yml
+plugin: cmdb
+api_url: https://cmdb.internal/api/v1
+
+bash
+
+ansible-inventory -i inventory/prod.cmdb.yml --graph
+
+۹️⃣ اسکریپت روزانه: Health Check
+سناریو
+
+هر روز صبح ۸:۰۰، بررسی سلامت همه سرورها، ارسال به Slack اگر مشکلی بود.
+python
+
+#!/usr/bin/env python3
+# daily/health_check.py
+"""
+Daily health check across all production servers.
+Run: cron 0 8 * * * /opt/scripts/daily/health_check.py
+"""
+import ansible_runner
+import json
+import logging
+import sys
+from datetime import datetime
+from pathlib import Path
+import requests
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[
+        logging.FileHandler('/var/log/ansible/health_check.log'),
+        logging.StreamHandler(),
+    ]
+)
+logger = logging.getLogger(__name__)
+
+PLAYBOOK = '/opt/ansible/project/project/health_check.yml'
+INVENTORY = '/etc/ansible/inventory/production'
+SLACK_WEBHOOK = 'https://hooks.slack.com/services/XXX'
+
+
+def run_health_check() -> dict:
+    logger.info("Starting daily health check")
+    
+    r = ansible_runner.run(
+        private_data_dir='/opt/ansible/project',
+        playbook='health_check.yml',
+        inventory=INVENTORY,
+        envvars={
+            'ANSIBLE_HOST_KEY_CHECKING': 'True',
+            'ANSIBLE_STDOUT_CALLBACK': 'json',
+            'ANSIBLE_FORKS': '20',
+        },
+        timeout=900,
+    )
+    
+    # Parse results
+    results = {
+        'timestamp': datetime.utcnow().isoformat(),
+        'status': r.status,
+        'rc': r.rc,
+        'hosts': {},
+        'issues': [],
+    }
+    
+    for event in r.events:
+        event_type = event.get('event')
+        data = event.get('event_data', {})
+        host = data.get('host')
+        
+        if event_type == 'runner_on_ok':
+            if host not in results['hosts']:
+                results['hosts'][host] = {'status': 'ok', 'checks': {}}
+            
+            task = data.get('task', '')
+            res = data.get('res', {})
+            results['hosts'][host]['checks'][task] = res
+        
+        elif event_type == 'runner_on_failed':
+            if host not in results['hosts']:
+                results['hosts'][host] = {'status': 'ok', 'checks': {}}
+            results['hosts'][host]['status'] = 'failed'
+            results['issues'].append({
+                'host': host,
+                'task': data.get('task'),
+                'msg': data.get('res', {}).get('msg', ''),
+            })
+        
+        elif event_type == 'runner_on_unreachable':
+            if host not in results['hosts']:
+                results['hosts'][host] = {'status': 'ok', 'checks': {}}
+            results['hosts'][host]['status'] = 'unreachable'
+            results['issues'].append({
+                'host': host,
+                'task': data.get('task'),
+                'msg': 'Host unreachable',
+            })
+    
+    return results
+
+
+def analyze_results(results: dict) -> dict:
+    """تحلیل نتایج و استخراج هشدارها"""
+    alerts = {
+        'critical': [],
+        'warning': [],
+        'info': [],
+    }
+    
+    for host, info in results['hosts'].items():
+        if info['status'] == 'unreachable':
+            alerts['critical'].append(f"🔌 {host}: unreachable")
+            continue
+        
+        if info['status'] == 'failed':
+            alerts['critical'].append(f"❌ {host}: failed")
+            continue
+        
+        # تحلیل disk
+        disk = info['checks'].get('check disk usage', {})
+        # فرض: task با assert برگشته
+        if disk.get('failed'):
+            alerts['warning'].append(f"💾 {host}: low disk")
+        
+        # تحلیل memory
+        mem = info['checks'].get('check memory', {})
+        if mem.get('failed'):
+            alerts['warning'].append(f"🧠 {host}: low memory")
+    
+    return alerts
+
+
+def send_slack_alert(alerts: dict, results: dict):
+    """ارسال به Slack"""
+    total = len(results['hosts'])
+    ok = sum(1 for h in results['hosts'].values() if h['status'] == 'ok')
+    
+    emoji = "✅" if not alerts['critical'] else "🚨"
+    
+    blocks = [
+        {
+            "type": "header",
+            "text": {"type": "plain_text", "text": f"{emoji} Daily Health Check"}
+        },
+        {
+            "type": "section",
+            "fields": [
+                {"type": "mrkdwn", "text": f"*Total Hosts:* {total}"},
+                {"type": "mrkdwn", "text": f"*OK:* {ok}"},
+                {"type": "mrkdwn", "text": f"*Critical:* {len(alerts['critical'])}"},
+                {"type": "mrkdwn", "text": f"*Warnings:* {len(alerts['warning'])}"},
+            ]
+        }
+    ]
+    
+    if alerts['critical']:
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": "*CRITICAL:*\n" + "\n".join(alerts['critical'][:10])}
+        })
+    
+    if alerts['warning']:
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": "*Warnings:*\n" + "\n".join(alerts['warning'][:10])}
+        })
+    
+    try:
+        requests.post(SLACK_WEBHOOK, json={"blocks": blocks}, timeout=10)
+    except Exception as e:
+        logger.error(f"Slack failed: {e}")
+
+
+def main():
+    try:
+        results = run_health_check()
+        logger.info(f"Health check: {results['status']}, hosts={len(results['hosts'])}")
+        
+        # ذخیره در DB
+        try:
+            import psycopg2
+            conn = psycopg2.connect(
+                host='db.internal', database='monitoring',
+                user='ansible', password=os.environ['DB_PASS']
+            )
+            cur = conn.cursor()
+            cur.execute("""
+                INSERT INTO health_checks (timestamp, status, total_hosts, ok_hosts, issues)
+                VALUES (%s, %s, %s, %s, %s)
+            """, (
+                results['timestamp'],
+                results['status'],
+                len(results['hosts']),
+                sum(1 for h in results['hosts'].values() if h['status'] == 'ok'),
+                json.dumps(results['issues']),
+            ))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.error(f"DB write failed: {e}")
+        
+        alerts = analyze_results(results)
+        
+        # فقط اگر critical هست، به Slack
+        if alerts['critical'] or alerts['warning']:
+            send_slack_alert(alerts, results)
+        
+        # Exit code
+        if alerts['critical']:
+            sys.exit(2)
+        elif alerts['warning']:
+            sys.exit(1)
+    
+    except Exception as e:
+        logger.exception(f"Health check crashed: {e}")
+        send_slack_alert({'critical': [f"Health check crashed: {e}"], 'warning': [], 'info': []}, {'hosts': {}})
+        sys.exit(3)
+
+
+if __name__ == '__main__':
+    import os
+    main()
+
+Playbook همراه
+yaml
+
+# playbooks/health_check.yml
+---
+- name: health check
+  hosts: all
+  gather_facts: yes
+  any_errors_fatal: false
+  ignore_unreachable: yes
+
+  tasks:
+    - name: check disk usage
+      assert:
+        that:
+          - item.size_available / item.size_total > 0.1
+        fail_msg: "Disk {{ item.mount }} below 10%"
+        quiet: yes
+      loop: "{{ ansible_mounts | selectattr('mount', 'match', '^/') | list }}"
+      loop_control:
+        label: "{{ item.mount }}"
+
+    - name: check memory
+      assert:
+        that:
+          - ansible_memfree_mb / ansible_memtotal_mb > 0.05
+        fail_msg: "Memory below 5%"
+        quiet: yes
+
+    - name: check critical services
+      systemd:
+        name: "{{ item }}"
+      loop: [ssh, systemd-journald]
+      register: svc
+      failed_when: svc.status.ActiveState != 'active'
+
+    - name: check load average
+      shell: cat /proc/loadavg | awk '{print $1}'
+      register: load
+      changed_when: false
+
+    - name: assert load reasonable
+      assert:
+        that:
+          - load.stdout | float < ansible_processor_vcpus * 2
+        fail_msg: "Load {{ load.stdout }} high for {{ ansible_processor_vcpus }} cores"
+        quiet: yes
+
+Cron
+bash
+
+# /etc/cron.d/ansible-healthcheck
+0 8 * * * ansible /opt/scripts/daily/health_check.py >> /var/log/ansible/health_cron.log 2>&1
+
+۱۰️⃣ اسکریپت روزانه: Deploy Automation
+سناریو
+
+هر بار که developer با tag جدید push می‌کند، GitHub Actions trigger می‌کند، این script اجرا می‌شود.
+python
+
+#!/usr/bin/env python3
+# daily/deploy.py
+"""
+Multi-environment deployment with canary + health checks + rollback.
+Usage: ./deploy.py --version 1.2.3 --env production
+"""
+import argparse
+import ansible_runner
+import json
+import logging
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+import requests
+import psycopg2
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+)
+logger = logging.getLogger(__name__)
+
+PRIVATE_DATA_DIR = '/opt/ansible/project'
+INVENTORY = {
+    'staging': '/etc/ansible/inventory/staging',
+    'production': '/etc/ansible/inventory/production',
+}
+SLACK_WEBHOOK = 'https://hooks.slack.com/services/XXX'
+
+
+class DeployError(Exception):
+    pass
+
+
+def notify_slack(message: str, color: str = 'good'):
+    blocks = [
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": message}
+        }
+    ]
+    try:
+        requests.post(
+            SLACK_WEBHOOK,
+            json={"attachments": [{"color": color, "blocks": blocks}]},
+            timeout=5,
+        )
+    except Exception as e:
+        logger.error(f"Slack: {e}")
+
+
+def run_playbook(
+    playbook: str,
+    env: str,
+    extravars: dict,
+    limit: str = 'all',
+    timeout: int = 1800,
+) -> dict:
+    """اجرای یک playbook و برگرداندن نتیجه"""
+    logger.info(f"Running {playbook} on {env}/{limit}")
+    
+    r = ansible_runner.run(
+        private_data_dir=PRIVATE_DATA_DIR,
+        playbook=playbook,
+        inventory=INVENTORY[env],
+        limit=limit,
+        extravars=extravars,
+        envvars={
+            'ANSIBLE_HOST_KEY_CHECKING': 'True',
+            'ANSIBLE_STDOUT_CALLBACK': 'json',
+            'ANSIBLE_FORKS': '10' if 'canary' in playbook else '5',
+        },
+        quiet=True,
+        timeout=timeout,
+    )
+    
+    result = {
+        'playbook': playbook,
+        'status': r.status,
+        'rc': r.rc,
+        'stats': {},
+        'failed_hosts': [],
+        'artifact': r.artifact_dir,
+    }
+    
+    for event in r.events:
+        et = event.get('event')
+        if et == 'playbook_on_stats':
+            result['stats'] = event.get('event_data', {})
+        elif et == 'runner_on_failed':
+            data = event.get('event_data', {})
+            result['failed_hosts'].append({
+                'host': data.get('host'),
+                'task': data.get('task'),
+                'msg': data.get('res', {}).get('msg', ''),
+            })
+    
+    return result
+
+
+def get_canary_hosts(env: str, count: int = 1) -> list:
+    """یک هاست به‌عنوان canary"""
+    r = ansible_runner.run(
+        private_data_dir=PRIVATE_DATA_DIR,
+        host_pattern=f'webservers_{env}',
+        module='ping',
+        inventory=INVENTORY[env],
+        quiet=True,
+    )
+    
+    hosts = []
+    for event in r.events:
+        if event.get('event') == 'runner_on_ok':
+            hosts.append(event['event_data']['host'])
+    
+    return hosts[:count]
+
+
+def deploy_canary(version: str, env: str) -> dict:
+    """Canary deployment"""
+    canary_hosts = get_canary_hosts(env, count=1)
+    if not canary_hosts:
+        raise DeployError(f"No hosts found for {env}")
+    
+    logger.info(f"Canary: {canary_hosts}")
+    
+    result = run_playbook(
+        playbook='deploy.yml',
+        env=env,
+        extravars={
+            'app_version': version,
+            'deploy_env': env,
+            'is_canary': True,
+        },
+        limit=canary_hosts[0],
+    )
+    
+    if result['status'] != 'successful':
+        raise DeployError(f"Canary failed: {result['failed_hosts']}")
+    
+    return result
+
+
+def validate_canary(version: str, env: str):
+    """تست canary به مدت ۵ دقیقه"""
+    logger.info("Validating canary for 5 minutes...")
+    
+    canary_hosts = get_canary_hosts(env, count=1)
+    host = canary_hosts[0]
+    
+    # بررسی health در ۵ دقیقه
+    for i in range(10):   # 10 × 30s = 5 min
+        r = ansible_runner.run(
+            private_data_dir=PRIVATE_DATA_DIR,
+            host_pattern=host,
+            module='uri',
+            module_args={
+                'url': f'http://{host}/health',
+                'status_code': 200,
+                'timeout': 5,
+            },
+            inventory=INVENTORY[env],
+            quiet=True,
+        )
+        
+        if r.rc != 0:
+            raise DeployError(f"Health check failed at iteration {i}")
+        
+        # بررسی error rate (اگر Prometheus داری)
+        try:
+            resp = requests.get(
+                f'http://prometheus.internal/api/v1/query',
+                params={'query': f'rate(http_requests_total{{host="{host}",status=~"5.."}}[1m])'},
+                timeout=5,
+            )
+            value = float(resp.json()['data']['result'][0]['value'][1])
+            if value > 0.01:  # بیش از 1% خطا
+                raise DeployError(f"Error rate high on canary: {value}")
+        except (IndexError, KeyError):
+            pass  # no data
+        
+        time.sleep(30)
+    
+    logger.info("Canary validated ✅")
+
+
+def deploy_rolling(version: str, env: str, batch_size: int = 5) -> dict:
+    """Rolling deployment بعد از canary"""
+    logger.info(f"Rolling deploy: batches of {batch_size}")
+    
+    result = run_playbook(
+        playbook='deploy.yml',
+        env=env,
+        extravars={
+            'app_version': version,
+            'deploy_env': env,
+            'is_canary': False,
+            'serial': str(batch_size),
+            'max_fail_percentage': 10,
+        },
+        limit='webservers',
+        timeout=3600,
+    )
+    
+    return result
+
+
+def record_deployment(version: str, env: str, result: dict, started: str):
+    """ذخیره در DB"""
+    try:
+        import os
+        conn = psycopg2.connect(
+            host='db.internal', database='deployments',
+            user='deploy', password=os.environ['DB_PASS'],
+        )
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO deployments 
+            (version, env, status, started_at, finished_at, stats, failed_hosts, artifact)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        """, (
+            version, env, result['status'],
+            started, datetime.utcnow().isoformat(),
+            json.dumps(result['stats']),
+            json.dumps(result['failed_hosts']),
+            result['artifact'],
+        ))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"DB record failed: {e}")
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--version', required=True)
+    parser.add_argument('--env', required=True, choices=['staging', 'production'])
+    parser.add_argument('--skip-canary', action='store_true')
+    parser.add_argument('--batch-size', type=int, default=5)
+    args = parser.parse_args()
+    
+    started = datetime.utcnow().isoformat()
+    deploy_id = f"{args.env}-{args.version}-{datetime.now():%Y%m%d-%H%M%S}"
+    
+    logger.info(f"=== Deploy {deploy_id} ===")
+    notify_slack(f"🚀 *Deploy started:* `{args.version}` → `{args.env}`")
+    
+    try:
+        # 1. Canary
+        if not args.skip_canary:
+            deploy_canary(args.version, args.env)
+            notify_slack(f"✅ Canary OK `{args.version}` on `{args.env}`")
+            
+            # 2. Validate
+            validate_canary(args.version, args.env)
+            notify_slack(f"✅ Canary validated after 5min `{args.version}`")
+        
+        # 3. Rolling
+        result = deploy_rolling(args.version, args.env, args.batch_size)
+        
+        if result['status'] != 'successful':
+            raise DeployError(f"Rolling failed: {result['failed_hosts']}")
+        
+        # 4. Record
+        record_deployment(args.version, args.env, result, started)
+        
+        notify_slack(
+            f"✅ *Deploy SUCCESS:* `{args.version}` → `{args.env}`\n"
+            f"Stats: {result['stats']}"
+        )
+        
+        logger.info(f"=== Deploy {deploy_id} SUCCESS ===")
+    
+    except DeployError as e:
+        logger.error(f"Deploy failed: {e}")
+        
+        # Rollback
+        logger.info("Initiating rollback...")
+        try:
+            rollback_result = run_playbook(
+                playbook='rollback.yml',
+                env=args.env,
+                extravars={'target_version': 'previous'},
+                limit='webservers',
+                timeout=1800,
+            )
+            notify_slack(
+                f"🔄 *Rollback triggered* `{args.version}` on `{args.env}`\n"
+                f"Reason: {e}\n"
+                f"Rollback: {rollback_result['status']}",
+                color='warning',
+            )
+        except Exception as rb_err:
+            notify_slack(
+                f"🚨 *ROLLBACK FAILED!* Manual intervention needed.\n"
+                f"Error: {e}\nRollback error: {rb_err}",
+                color='danger',
+            )
+            sys.exit(3)
+        
+        sys.exit(2)
+    
+    except Exception as e:
+        logger.exception("Unexpected error")
+        notify_slack(f"🚨 Deploy crashed: {e}", color='danger')
+        sys.exit(1)
+
+
+if __name__ == '__main__':
+    import os
+    main()
+
+اجرا
+bash
+
+# CI/CD
+./deploy.py --version 1.2.3 --env staging
+./deploy.py --version 1.2.3 --env production --batch-size 3
+
+۱۱️⃣ اسکریپت روزانه: Rollback Automation
+python
+
+#!/usr/bin/env python3
+# daily/rollback.py
+"""
+Rollback to previous version based on deployment history in DB.
+Usage: ./rollback.py --env production --to-version 1.2.2 [--force]
+"""
+import argparse
+import ansible_runner
+import json
+import logging
+import sys
+import os
+import psycopg2
+from datetime import datetime
+
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
+
+
+def get_current_version(env: str) -> str:
+    """آخرین نسخه deploy شده"""
+    conn = psycopg2.connect(
+        host='db.internal', database='deployments',
+        user='deploy', password=os.environ['DB_PASS'],
+    )
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT version FROM deployments
+        WHERE env = %s AND status = 'successful'
+        ORDER BY finished_at DESC
+        LIMIT 1
+    """, (env,))
+    row = cur.fetchone()
+    conn.close()
+    return row[0] if row else None
+
+
+def get_previous_version(env: str, current: str) -> str:
+    """نسخه قبل از current"""
+    conn = psycopg2.connect(
+        host='db.internal', database='deployments',
+        user='deploy', password=os.environ['DB_PASS'],
+    )
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT version FROM deployments
+        WHERE env = %s AND status = 'successful' AND version != %s
+        ORDER BY finished_at DESC
+        LIMIT 1
+    """, (env, current))
+    row = cur.fetchone()
+    conn.close()
+    return row[0] if row else None
+
+
+def rollback(env: str, target_version: str) -> dict:
+    r = ansible_runner.run(
+        private_data_dir='/opt/ansible/project',
+        playbook='rollback.yml',
+        inventory=f'/etc/ansible/inventory/{env}',
+        extravars={
+            'target_version': target_version,
+            'env': env,
+            'rollback_reason': 'manual',
+        },
+        envvars={
+            'ANSIBLE_HOST_KEY_CHECKING': 'True',
+            'ANSIBLE_STDOUT_CALLBACK': 'json',
+        },
+        quiet=True,
+        timeout=1800,
+    )
+    
+    return {
+        'status': r.status,
+        'rc': r.rc,
+        'artifact': r.artifact_dir,
+    }
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--env', required=True, choices=['staging', 'production'])
+    parser.add_argument('--to-version', help='Target version (default: previous)')
+    parser.add_argument('--force', action='store_true')
+    args = parser.parse_args()
+    
+    current = get_current_version(args.env)
+    if not current:
+        logger.error(f"No deployment found for {args.env}")
+        sys.exit(1)
+    
+    target = args.to_version or get_previous_version(args.env, current)
+    if not target:
+        logger.error("No previous version found")
+        sys.exit(1)
+    
+    logger.info(f"Rollback: {current} → {target} on {args.env}")
+    
+    if not args.force:
+        confirm = input(f"Rollback {args.env} from {current} to {target}? [y/N] ")
+        if confirm.lower() != 'y':
+            print("Aborted")
+            sys.exit(0)
+    
+    result = rollback(args.env, target)
+    
+    if result['status'] == 'successful':
+        logger.info(f"✅ Rollback to {target} succeeded")
+        sys.exit(0)
+    else:
+        logger.error(f"❌ Rollback failed")
+        sys.exit(2)
+
+
+if __name__ == '__main__':
+    main()
+
+۱۲️⃣ اسکریپت روزانه: Incident Response
+python
+
+#!/usr/bin/env python3
+# daily/incident.py
+"""
+Incident response automation:
+- Isolate host
+- Collect forensic
+- Notify
+Usage: ./incident.py --host web01 --reason "compromised"
+"""
+import argparse
+import ansible_runner
+import logging
+import shutil
+from datetime import datetime
+from pathlib import Path
+import requests
+
+logger = logging.getLogger(__name__)
+
+
+def isolate_host(host: str) -> dict:
+    """بلاک کردن همه ترافیک به‌جز management"""
+    logger.info(f"Isolating {host}")
+    
+    r = ansible_runner.run(
+        private_data_dir='/opt/ansible/project',
+        playbook='incident/isolate.yml',
+        inventory='/etc/ansible/inventory/production',
+        limit=host,
+        extravars={
+            'management_cidr': '10.0.0.0/24',
+            'incident_time': datetime.utcnow().isoformat(),
+        },
+        quiet=False,
+        timeout=300,
+    )
+    
+    return {'status': r.status, 'rc': r.rc}
+
+
+def collect_forensic(host: str) -> str:
+    """جمع‌آوری evidence"""
+    logger.info(f"Collecting forensic from {host}")
+    
+    r = ansible_runner.run(
+        private_data_dir='/opt/ansible/project',
+        playbook='incident/forensic.yml',
+        inventory='/etc/ansible/inventory/production',
+        limit=host,
+        quiet=True,
+        timeout=600,
+    )
+    
+    # آرشیو شواهد در مسیر امن
+    incident_dir = f'/var/incidents/{host}-{datetime.now():%Y%m%d-%H%M%S}'
+    Path(incident_dir).mkdir(parents=True, exist_ok=True)
+    
+    shutil.copytree(r.artifact_dir, f'{incident_dir}/ansible-artifacts')
+    
+    # checksum
+    import subprocess
+    subprocess.run(
+        ['sha256sum', '-r', '.'],
+        cwd=incident_dir,
+        stdout=open(f'{incident_dir}/SHA256SUMS', 'w'),
+        check=True,
+    )
+    
+    logger.info(f"Evidence saved to {incident_dir}")
+    return incident_dir
+
+
+def notify_security(host: str, reason: str, incident_dir: str):
+    """اطلاع به تیم امنیت"""
+    message = f"""
+🚨 *SECURITY INCIDENT*
+
+*Host:* `{host}`
+*Reason:* {reason}
+*Time:* {datetime.utcnow().isoformat()}
+*Isolated:* ✅
+*Evidence:* `{incident_dir}`
+
+Awaiting security team review.
+"""
+    
+    # Slack
+    try:
+        requests.post(
+            'https://hooks.slack.com/services/SECURITY_WEBHOOK',
+            json={'text': message},
+            timeout=10,
+        )
+    except Exception as e:
+        logger.error(f"Slack: {e}")
+    
+    # PagerDuty
+    try:
+        requests.post(
+            'https://events.pagerduty.com/v2/enqueue',
+            json={
+                'routing_key': os.environ['PD_KEY'],
+                'event_action': 'trigger',
+                'payload': {
+                    'summary': f'Security incident: {host}',
+                    'severity': 'critical',
+                    'source': host,
+                    'custom_details': {'reason': reason, 'evidence': incident_dir},
+                }
+            },
+            timeout=10,
+        )
+    except Exception as e:
+        logger.error(f"PagerDuty: {e}")
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--host', required=True)
+    parser.add_argument('--reason', required=True)
+    args = parser.parse_args()
+    
+    logging.basicConfig(level=logging.INFO)
+    
+    logger.info(f"=== Incident on {args.host} ===")
+    
+    # 1. Isolate
+    result = isolate_host(args.host)
+    if result['status'] != 'successful':
+        logger.error(f"Isolation failed: {result}")
+        sys.exit(2)
+    
+    # 2. Collect evidence
+    incident_dir = collect_forensic(args.host)
+    
+    # 3. Notify
+    notify_security(args.host, args.reason, incident_dir)
+    
+    logger.info("=== Incident response complete ===")
+    print(f"\nEvidence: {incident_dir}")
+    print("Next steps:")
+    print("  1. Security team review evidence")
+    print("  2. Rotate credentials for affected services")
+    print("  3. Rebuild host from clean image")
+    print("  4. Post-mortem within 5 days")
+
+
+if __name__ == '__main__':
+    import os, sys
+    main()
+
+۱۳️⃣ اسکریپت هفتگی: Compliance Audit
+python
+
+#!/usr/bin/env python3
+# weekly/compliance_audit.py
+"""
+Weekly compliance audit (CIS benchmark, SSH hardening, etc.)
+Run: 0 6 * * 1 (Monday 6am)
+"""
+import argparse
+import ansible_runner
+import json
+import logging
+from datetime import datetime
+from pathlib import Path
+import psycopg2
+
+logger = logging.getLogger(__name__)
+
+
+CHECKS = {
+    'cis_level1': {
+        'playbook': 'compliance/cis-level1.yml',
+        'check_mode': True,
+    },
+    'ssh_hardening': {
+        'playbook': 'compliance/ssh-hardening-check.yml',
+        'check_mode': True,
+    },
+    'package_updates': {
+        'playbook': 'compliance/package-audit.yml',
+        'check_mode': True,
+    },
+    'user_audit': {
+        'playbook': 'compliance/user-audit.yml',
+        'check_mode': True,
+    },
+}
+
+
+def run_audit(check_name: str, config: dict, env: str) -> dict:
+    """اجرای یک check"""
+    logger.info(f"Running {check_name}")
+    
+    r = ansible_runner.run(
+        private_data_dir='/opt/ansible/project',
+        playbook=config['playbook'],
+        inventory=f'/etc/ansible/inventory/{env}',
+        envvars={
+            'ANSIBLE_HOST_KEY_CHECKING': 'True',
+            'ANSIBLE_STDOUT_CALLBACK': 'json',
+            'ANSIBLE_FORKS': '20',
+        },
+        cmdline='--check --diff' if config['check_mode'] else '',
+        quiet=True,
+        timeout=3600,
+    )
+    
+    # Parse findings
+    findings = []
+    for event in r.events:
+        if event.get('event') == 'runner_on_failed':
+            data = event.get('event_data', {})
+            findings.append({
+                'host': data.get('host'),
+                'task': data.get('task'),
+                'msg': data.get('res', {}).get('msg', ''),
+                'severity': extract_severity(data.get('task', '')),
+            })
+        elif event.get('event') == 'runner_on_ok':
+            data = event.get('event_data', {})
+            # بعضی checkها در assert pass گزارش نمی‌دهند
+            pass
+    
+    return {
+        'check': check_name,
+        'status': r.status,
+        'findings': findings,
+        'artifact': r.artifact_dir,
+    }
+
+
+def extract_severity(task_name: str) -> str:
+    """استخراج severity از نام task"""
+    name = task_name.lower()
+    if 'critical' in name or 'root' in name or 'firewall' in name:
+        return 'high'
+    elif 'warning' in name or 'config' in name:
+        return 'medium'
+    return 'low'
+
+
+def generate_report(all_findings: list) -> dict:
+    """تولید گزارش هفتگی"""
+    report = {
+        'date': datetime.utcnow().isoformat(),
+        'total_findings': sum(len(r['findings']) for r in all_findings),
+        'by_severity': {'high': 0, 'medium': 0, 'low': 0},
+        'by_host': {},
+        'top_findings': [],
+    }
+    
+    for result in all_findings:
+        for finding in result['findings']:
+            report['by_severity'][finding['severity']] += 1
+            
+            host = finding['host']
+            report['by_host'].setdefault(host, []).append(finding)
+    
+    # Top 10 hosts با بیشترین finding
+    report['top_hosts'] = sorted(
+        report['by_host'].items(),
+        key=lambda x: len(x[1]),
+        reverse=True,
+    )[:10]
+    
+    return report
+
+
+def save_to_db(report: dict):
+    import os
+    conn = psycopg2.connect(
+        host='db.internal', database='compliance',
+        user='audit', password=os.environ['DB_PASS'],
+    )
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO compliance_audits
+        (audit_date, total_findings, high, medium, low, report_json)
+        VALUES (%s, %s, %s, %s, %s, %s)
+    """, (
+        report['date'],
+        report['total_findings'],
+        report['by_severity']['high'],
+        report['by_severity']['medium'],
+        report['by_severity']['low'],
+        json.dumps(report),
+    ))
+    conn.commit()
+    conn.close()
+
+
+def send_report_email(report: dict):
+    """ارسال ایمیل هفتگی"""
+    import smtplib
+    from email.mime.text import MIMEText
+    from email.mime.multipart import MIMEMultipart
+    
+    html = f"""
+    <h2>Weekly Compliance Report</h2>
+    <p>Date: {report['date']}</p>
+    <h3>Summary</h3>
+    <ul>
+        <li>Total findings: <b>{report['total_findings']}</b></li>
+        <li>High: <span style="color:red">{report['by_severity']['high']}</span></li>
+        <li>Medium: <span style="color:orange">{report['by_severity']['medium']}</span></li>
+        <li>Low: <span style="color:gray">{report['by_severity']['low']}</span></li>
+    </ul>
+    <h3>Top 10 Hosts</h3>
+    <table border="1" cellpadding="5">
+    <tr><th>Host</th><th>Findings</th></tr>
+    """
+    for host, findings in report['top_hosts']:
+        html += f"<tr><td>{host}</td><td>{len(findings)}</td></tr>"
+    html += "</table>"
+    
+    msg = MIMEMultipart('alternative')
+    msg['Subject'] = f"[Compliance] Weekly Report {report['date'][:10]}"
+    msg['From'] = 'ansible@example.com'
+    msg['To'] = 'security@example.com, compliance@example.com'
+    msg.attach(MIMEText(html, 'html'))
+    
+    smtp = smtplib.SMTP('smtp.internal', 587)
+    smtp.starttls()
+    smtp.send_message(msg)
+    smtp.quit()
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--env', default='production')
+    parser.add_argument('--output', default='/var/reports/compliance')
+    args = parser.parse_args()
+    
+    logging.basicConfig(level=logging.INFO)
+    
+    all_results = []
+    for check_name, config in CHECKS.items():
+        try:
+            result = run_audit(check_name, config, args.env)
+            all_results.append(result)
+            logger.info(f"  {check_name}: {len(result['findings'])} findings")
+        except Exception as e:
+            logger.exception(f"  {check_name} failed: {e}")
+    
+    report = generate_report(all_results)
+    
+    # ذخیره
+    Path(args.output).mkdir(parents=True, exist_ok=True)
+    report_file = f"{args.output}/report-{datetime.now():%Y%m%d}.json"
+    with open(report_file, 'w') as f:
+        json.dump(report, f, indent=2)
+    
+    save_to_db(report)
+    send_report_email(report)
+    
+    logger.info(f"Report: {report_file}")
+    logger.info(f"Total: {report['total_findings']} findings")
+
+
+if __name__ == '__main__':
+    import os
+    main()
+
+۱۴️⃣ اسکریپت هفتگی: Capacity Report
+python
+
+#!/usr/bin/env python3
+# weekly/capacity_report.py
+"""
+Weekly capacity analysis: CPU, memory, disk trends.
+Predicts when resources will run out.
+"""
+import ansible_runner
+import json
+import logging
+from datetime import datetime, timedelta
+from pathlib import Path
+from statistics import mean
+import psycopg2
+
+logger = logging.getLogger(__name__)
+
+
+def collect_metrics(env: str) -> dict:
+    """جمع‌آوری metric از همه هاست‌ها"""
+    r = ansible_runner.run(
+        private_data_dir='/opt/ansible/project',
+        playbook='monitoring/collect-capacity.yml',
+        inventory=f'/etc/ansible/inventory/{env}',
+        envvars={
+            'ANSIBLE_HOST_KEY_CHECKING': 'True',
+            'ANSIBLE_STDOUT_CALLBACK': 'json',
+            'ANSIBLE_FORKS': '20',
+        },
+        quiet=True,
+        timeout=1800,
+    )
+    
+    metrics = {}
+    for event in r.events:
+        if event.get('event') != 'runner_on_ok':
+            continue
+        
+        data = event.get('event_data', {})
+        host = data.get('host')
+        task = data.get('task', '')
+        res = data.get('res', {})
+        
+        if 'collect metrics' in task.lower():
+            # فرض: module با stdout JSON برمی‌گرداند
+            try:
+                metrics[host] = json.loads(res.get('stdout', '{}'))
+            except json.JSONDecodeError:
+                logger.warning(f"{host}: invalid JSON")
+    
+    return metrics
+
+
+def analyze_trends(env: str) -> dict:
+    """تحلیل روند از داده‌های ۴ هفته گذشته"""
+    conn = psycopg2.connect(
+        host='db.internal', database='monitoring',
+        user='ansible', password='xxx',
+    )
+    cur = conn.cursor()
+    
+    # query برای ۴ هفته اخیر
+    cur.execute("""
+        SELECT host, metric, date, value
+        FROM capacity_metrics
+        WHERE env = %s AND date > %s
+        ORDER BY host, metric, date
+    """, (env, (datetime.now() - timedelta(days=28)).date()))
+    
+    data = {}
+    for host, metric, date, value in cur.fetchall():
+        data.setdefault(host, {}).setdefault(metric, []).append((date, value))
+    
+    conn.close()
+    
+    # محاسبه رشد
+    analysis = {}
+    for host, metrics in data.items():
+        analysis[host] = {}
+        for metric, points in metrics.items():
+            if len(points) < 2:
+                continue
+            
+            values = [p[1] for p in points]
+            dates = [p[0] for p in points]
+            
+            # linear regression ساده
+            n = len(values)
+            x = list(range(n))
+            slope = (n * sum(i*v for i, v in zip(x, values)) - sum(x)*sum(values)) / (n*sum(i*i for i in x) - sum(x)**2) if n > 1 else 0
+            
+            current = values[-1]
+            # روزهای باقی‌مانده تا 100% (اگر slope مثبت باشد)
+            days_to_full = None
+            if slope > 0 and metric.endswith('_pct'):
+                days_to_full = int((100 - current) / slope) if current < 100 else 0
+            
+            analysis[host][metric] = {
+                'current': current,
+                'mean_4w': mean(values),
+                'slope_per_day': round(slope, 3),
+                'days_to_full': days_to_full,
+            }
+    
+    return analysis
+
+
+def generate_capacity_report(env: str) -> dict:
+    """گزارش کامل capacity"""
+    current = collect_metrics(env)
+    trends = analyze_trends(env)
+    
+    report = {
+        'env': env,
+        'generated': datetime.utcnow().isoformat(),
+        'current': current,
+        'trends': trends,
+        'warnings': [],
+        'recommendations': [],
+    }
+    
+    for host, metrics in trends.items():
+        for metric, data in metrics.items():
+            if data.get('days_to_full') and data['days_to_full'] < 30:
+                report['warnings'].append({
+                    'host': host,
+                    'metric': metric,
+                    'current_pct': data['current'],
+                    'days_to_full': data['days_to_full'],
+                    'severity': 'high' if data['days_to_full'] < 7 else 'medium',
+                })
+    
+    # توصیه‌های scaling
+    for host, metrics in trends.items():
+        cpu_days = metrics.get('cpu_pct', {}).get('days_to_full')
+        mem_days = metrics.get('memory_pct', {}).get('days_to_full')
+        
+        if cpu_days and cpu_days < 14:
+            report['recommendations'].append(
+                f"{host}: Add CPU cores within {cpu_days} days"
+            )
+        if mem_days and mem_days < 14:
+            report['recommendations'].append(
+                f"{host}: Add RAM within {mem_days} days"
+            )
+    
+    return report
+
+
+def save_report(report: dict):
+    output_dir = Path('/var/reports/capacity')
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    file = output_dir / f"capacity-{report['env']}-{datetime.now():%Y%m%d}.json"
+    with open(file, 'w') as f:
+        json.dump(report, f, indent=2)
+    
+    logger.info(f"Report: {file}")
+    
+    # Slack digest
+    if report['warnings']:
+        import requests
+        top = report['warnings'][:5]
+        msg = f"⚠️ *Capacity Warnings* ({report['env']})\n"
+        for w in top:
+            msg += f"• `{w['host']}` {w['metric']}: {w['current_pct']:.1f}% → {w['days_to_full']}d\n"
+        
+        requests.post(
+            'https://hooks.slack.com/services/XXX',
+            json={'text': msg},
+            timeout=10,
+        )
+
+
+def main():
+    for env in ['staging', 'production']:
+        logger.info(f"Analyzing {env}")
+        report = generate_capacity_report(env)
+        save_report(report)
+        
+        logger.info(f"  Warnings: {len(report['warnings'])}")
+        logger.info(f"  Recommendations: {len(report['recommendations'])}")
+
+
+if __name__ == '__main__':
+    logging.basicConfig(level=logging.INFO)
+    main()
+
+۱۵️⃣ اسکریپت هفتگی: Patch Management
+python
+
+#!/usr/bin/env python3
+# weekly/patch_management.py
+"""
+Weekly patch management:
+1. Scan for available patches
+2. Categorize by severity
+3. Apply in batches with maintenance windows
+"""
+import argparse
+import ansible_runner
+import json
+import logging
+from datetime import datetime
+import sys
+
+logger = logging.getLogger(__name__)
+
+
+def scan_patches(env: str) -> dict:
+    """اسکن patch های موجود"""
+    logger.info(f"Scanning patches on {env}")
+    
+    r = ansible_runner.run(
+        private_data_dir='/opt/ansible/project',
+        playbook='patching/scan.yml',
+        inventory=f'/etc/ansible/inventory/{env}',
+        envvars={'ANSIBLE_FORKS': '20', 'ANSIBLE_STDOUT_CALLBACK': 'json'},
+        quiet=True,
+        timeout=1800,
+    )
+    
+    results = {}
+    for event in r.events:
+        if event.get('event') == 'runner_on_ok':
+            data = event.get('event_data', {})
+            host = data.get('host')
+            task = data.get('task', '')
+            res = data.get('res', {})
+            
+            if 'scan' in task.lower():
+                try:
+                    results[host] = json.loads(res.get('stdout', '{}'))
+                except json.JSONDecodeError:
+                    pass
+    
+    return results
+
+
+def categorize_and_plan(patches: dict) -> dict:
+    """دسته‌بندی و برنامه‌ریزی"""
+    plan = {
+        'security': [],
+        'bugfix': [],
+        'enhancement': [],
+    }
+    
+    for host, data in patches.items():
+        for pkg in data.get('packages', []):
+            category = pkg.get('type', 'bugfix')
+            plan[category].append({
+                'host': host,
+                'package': pkg['name'],
+                'current': pkg['current'],
+                'available': pkg['available'],
+                'severity': pkg.get('severity', 'moderate'),
+                'reboot_required': pkg.get('reboot', False),
+            })
+    
+    return plan
+
+
+def apply_security_patches(env: str, batches: list) -> dict:
+    """اعمال security patches"""
+    results = []
+    
+    for batch in batches:
+        logger.info(f"Batch: {batch}")
+        
+        r = ansible_runner.run(
+            private_data_dir='/opt/ansible/project',
+            playbook='patching/apply-security.yml',
+            inventory=f'/etc/ansible/inventory/{env}',
+            limit=','.join(batch),
+            envvars={
+                'ANSIBLE_FORKS': '10',
+                'ANSIBLE_STDOUT_CALLBACK': 'json',
+            },
+            quiet=True,
+            timeout=3600,
+        )
+        
+        results.append({
+            'batch': batch,
+            'status': r.status,
+            'rc': r.rc,
+        })
+    
+    return {'batches': results}
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--env', default='production')
+    parser.add_argument('--apply', action='store_true')
+    parser.add_argument('--security-only', action='store_true')
+    parser.add_argument('--batch-size', type=int, default=5)
+    parser.add_argument('--max-duration', type=int, default=4, help='hours')
+    args = parser.parse_args()
+    
+    logging.basicConfig(level=logging.INFO)
+    
+    # 1. Scan
+    patches = scan_patches(args.env)
+    plan = categorize_and_plan(patches)
+    
+    logger.info(f"Security: {len(plan['security'])} patches")
+    logger.info(f"Bugfix:   {len(plan['bugfix'])} patches")
+    logger.info(f"Enhancement: {len(plan['enhancement'])} patches")
+    
+    # 2. Plan batches
+    hosts_with_security = sorted(set(p['host'] for p in plan['security']))
+    batches = [
+        hosts_with_security[i:i+args.batch_size]
+        for i in range(0, len(hosts_with_security), args.batch_size)
+    ]
+    
+    # 3. Apply (اگر --apply)
+    if args.apply and plan['security']:
+        logger.info(f"Applying patches in {len(batches)} batches")
+        results = apply_security_patches(args.env, batches)
+        
+        for r in results['batches']:
+            icon = "✅" if r['status'] == 'successful' else "❌"
+            logger.info(f"{icon} {r['batch']}")
+        
+        if any(r['status'] != 'successful' for r in results['batches']):
+            sys.exit(2)
+    
+    # 4. Save report
+    with open(f"/var/reports/patching/{args.env}-{datetime.now():%Y%m%d}.json", 'w') as f:
+        json.dump({'plan': plan, 'batches': batches}, f, indent=2)
+
+
+if __name__ == '__main__':
+    from pathlib import Path
+    Path('/var/reports/patching').mkdir(parents=True, exist_ok=True)
+    main()
+
+۱۶️⃣ اسکریپت هفتگی: Cost Optimization (AWS)
+python
+
+#!/usr/bin/env python3
+# weekly/cost_optimization.py
+"""
+Weekly cost analysis for AWS resources.
+Identifies idle/oversized resources.
+"""
+import boto3
+import ansible_runner
+import json
+import logging
+from datetime import datetime, timedelta
+
+logger = logging.getLogger(__name__)
+
+
+class CostAnalyzer:
+    def __init__(self, region: str = 'us-east-1'):
+        self.ec2 = boto3.client('ec2', region_name=region)
+        self.cw = boto3.client('cloudwatch', region_name=region)
+        self.pricing = boto3.client('pricing', region_name='us-east-1')
+        self.region = region
+
+    def find_idle_instances(self, days: int = 7) -> list:
+        """EC2 instances با CPU < 5% در N روز گذشته"""
+        idle = []
+        
+        # همه instances running
+        instances = self.ec2.describe_instances(
+            Filters=[
+                {'Name': 'instance-state-name', 'Values': ['running']},
+                {'Name': 'tag:Environment', 'Values': ['production', 'staging']},
+            ]
+        )
+        
+        for reservation in instances['Reservations']:
+            for inst in reservation['Instances']:
+                inst_id = inst['InstanceId']
+                
+                # میانگین CPU ۷ روز
+                response = self.cw.get_metric_statistics(
+                    Namespace='AWS/EC2',
+                    MetricName='CPUUtilization',
+                    Dimensions=[{'Name': 'InstanceId', 'Value': inst_id}],
+                    StartTime=datetime.utcnow() - timedelta(days=days),
+                    EndTime=datetime.utcnow(),
+                    Period=3600,
+                    Statistics=['Average'],
+                )
+                
+                if response['Datapoints']:
+                    avg_cpu = sum(d['Average'] for d in response['Datapoints']) / len(response['Datapoints'])
+                    if avg_cpu < 5.0:
+                        idle.append({
+                            'instance_id': inst_id,
+                            'type': inst['InstanceType'],
+                            'avg_cpu': round(avg_cpu, 2),
+                            'tags': {t['Key']: t['Value'] for t in inst.get('Tags', [])},
+                        })
+        
+        return idle
+
+    def estimate_monthly_savings(self, instances: list) -> float:
+        """تخمین صرفه‌جویی ماهانه"""
+        savings = 0
+        for inst in instances:
+            # قیمت تقریبی (باید از pricing API بگیرد)
+            hourly_price = {
+                't3.micro': 0.0104,
+                't3.small': 0.0208,
+                't3.medium': 0.0416,
+                'm5.large': 0.096,
+                'm5.xlarge': 0.192,
+            }.get(inst['type'], 0.05)
+            
+            savings += hourly_price * 730   # ساعت در ماه
+        
+        return round(savings, 2)
+
+    def find_oversized(self) -> list:
+        """instances با CPU < 20% (کاندید downgrade)"""
+        oversized = []
+        
+        instances = self.ec2.describe_instances(
+            Filters=[{'Name': 'instance-state-name', 'Values': ['running']}]
+        )
+        
+        for reservation in instances['Reservations']:
+            for inst in reservation['Instances']:
+                inst_id = inst['InstanceId']
+                
+                # Max CPU ۳۰ روز
+                response = self.cw.get_metric_statistics(
+                    Namespace='AWS/EC2',
+                    MetricName='CPUUtilization',
+                    Dimensions=[{'Name': 'InstanceId', 'Value': inst_id}],
+                    StartTime=datetime.utcnow() - timedelta(days=30),
+                    EndTime=datetime.utcnow(),
+                    Period=3600,
+                    Statistics=['Maximum', 'Average'],
+                )
+                
+                if response['Datapoints']:
+                    max_cpu = max(d['Maximum'] for d in response['Datapoints'])
+                    avg_cpu = sum(d['Average'] for d in response['Datapoints']) / len(response['Datapoints'])
+                    
+                    if max_cpu < 40 and avg_cpu < 15:
+                        oversized.append({
+                            'instance_id': inst_id,
+                            'type': inst['InstanceType'],
+                            'avg_cpu': round(avg_cpu, 2),
+                            'max_cpu': round(max_cpu, 2),
+                            'current_type': inst['InstanceType'],
+                            'suggested_type': self._suggest_downgrade(inst['InstanceType']),
+                        })
+        
+        return oversized
+
+    def _suggest_downgrade(self, instance_type: str) -> str:
+        downgrades = {
+            'm5.xlarge': 'm5.large',
+            'm5.large': 't3.medium',
+            't3.large': 't3.medium',
+            't3.medium': 't3.small',
+            'c5.xlarge': 'c5.large',
+        }
+        return downgrades.get(instance_type, instance_type)
+
+    def find_unattached_volumes(self) -> list:
+        """EBS volumes بدون instance"""
+        volumes = self.ec2.describe_volumes(
+            Filters=[{'Name': 'status', 'Values': ['available']}]
+        )
+        
+        return [
+            {
+                'volume_id': v['VolumeId'],
+                'size': v['Size'],
+                'type': v['VolumeType'],
+                'created': v['CreateTime'].isoformat(),
+            }
+            for v in volumes['Volumes']
+        ]
+
+
+def generate_report(analyzer: CostAnalyzer) -> dict:
+    idle = analyzer.find_idle_instances(days=7)
+    oversized = analyzer.find_oversized()
+    volumes = analyzer.find_unattached_volumes()
+    
+    total_savings = analyzer.estimate_monthly_savings(idle)
+    
+    report = {
+        'generated': datetime.utcnow().isoformat(),
+        'region': analyzer.region,
+        'idle_instances': idle,
+        'oversized': oversized,
+        'unattached_volumes': volumes,
+        'estimated_monthly_savings': total_savings,
+    }
+    
+    return report
+
+
+def save_report(report: dict):
+    from pathlib import Path
+    Path('/var/reports/cost').mkdir(parents=True, exist_ok=True)
+    file = f"/var/reports/cost/cost-{report['generated'][:10]}.json"
+    with open(file, 'w') as f:
+        json.dump(report, f, indent=2)
+    return file
+
+
+def notify_finops(report: dict):
+    import requests
+    msg = f"""
+💰 *Weekly Cost Report*
+
+*Idle instances:* {len(report['idle_instances'])} (${report['estimated_monthly_savings']}/mo potential)
+*Oversized:* {len(report['oversized'])}
+*Unattached volumes:* {len(report['unattached_volumes'])}
+
+Top idle:
+""" + '\n'.join(f"• `{i['instance_id']}` ({i['type']}) — CPU {i['avg_cpu']}%"
+                  for i in report['idle_instances'][:5])
+    
+    requests.post(
+        'https://hooks.slack.com/services/FINOPS',
+        json={'text': msg},
+        timeout=10,
+    )
+
+
+def main():
+    logging.basicConfig(level=logging.INFO)
+    
+    analyzer = CostAnalyzer(region='us-east-1')
+    report = generate_report(analyzer)
+    file = save_report(report)
+    
+    logger.info(f"Report: {file}")
+    logger.info(f"Potential savings: ${report['estimated_monthly_savings']}/mo")
+    
+    notify_finops(report)
+
+
+if __name__ == '__main__':
+    main()
+
+۱۷️⃣ FastAPI Server (REST API روی Ansible)
+python
+
+# api/main.py
+"""
+REST API wrapping Ansible.
+Endpoints:
+  POST /deploy {version, env, limit}
+  POST /rollback {env, to_version}
+  GET  /deploys
+  GET  /deploys/{id}
+  GET  /hosts/{host}/facts
+  GET  /health
+"""
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from pydantic import BaseModel, Field
+from typing import Optional
+import ansible_runner
+import json
+import uuid
+from datetime import datetime
+import logging
+
+logger = logging.getLogger(__name__)
+
+app = FastAPI(title="Ansible API", version="1.0.0")
+security = HTTPBearer()
+
+# Job storage (production: use Redis/DB)
+JOBS = {}
+
+# Token validation
+API_TOKENS = {'admin': 'TOKEN_ADMIN_123', 'deployer': 'TOKEN_DEPLOY_456'}
+
+def verify_token(creds: HTTPAuthorizationCredentials = Depends(security)):
+    token = creds.credentials
+    for user, valid in API_TOKENS.items():
+        if token == valid:
+            return user
+    raise HTTPException(401, "Invalid token")
+
+
+class DeployRequest(BaseModel):
+    version: str = Field(..., pattern=r'^v?\d+\.\d+\.\d+$')
+    env: str = Field(..., pattern=r'^(staging|production)$')
+    limit: str = 'all'
+    dry_run: bool = False
+
+
+class RollbackRequest(BaseModel):
+    env: str
+    to_version: str
+
+
+class JobResponse(BaseModel):
+    job_id: str
+    status: str
+    submitted_at: str
+
+
+def execute_job(job_id: str, playbook: str, inventory: str,
+                extravars: dict, limit: str, dry_run: bool):
+    """Background task"""
+    try:
+        cmdline = '--check --diff' if dry_run else ''
+        
+        r = ansible_runner.run(
+            private_data_dir='/opt/ansible/project',
+            playbook=playbook,
+            inventory=inventory,
+            limit=limit,
+            extravars=extravars,
+            cmdline=cmdline,
+            envvars={
+                'ANSIBLE_HOST_KEY_CHECKING': 'True',
+                'ANSIBLE_STDOUT_CALLBACK': 'json',
+                'ANSIBLE_FORKS': '10',
+            },
+            quiet=True,
+            timeout=3600,
+        )
+        
+        JOBS[job_id]['status'] = r.status
+        JOBS[job_id]['rc'] = r.rc
+        JOBS[job_id]['finished_at'] = datetime.utcnow().isoformat()
+        JOBS[job_id]['artifact'] = r.artifact_dir
+        
+        # Parse stats
+        stats = {}
+        failures = []
+        for event in r.events:
+            if event.get('event') == 'playbook_on_stats':
+                stats = event.get('event_data', {})
+            elif event.get('event') == 'runner_on_failed':
+                data = event.get('event_data', {})
+                failures.append({
+                    'host': data.get('host'),
+                    'task': data.get('task'),
+                })
+        
+        JOBS[job_id]['stats'] = stats
+        JOBS[job_id]['failures'] = failures
+    
+    except Exception as e:
+        logger.exception("Job failed")
+        JOBS[job_id]['status'] = 'error'
+        JOBS[job_id]['error'] = str(e)
+
+
+@app.post("/deploy", response_model=JobResponse, status_code=202)
+def deploy(
+    req: DeployRequest,
+    background: BackgroundTasks,
+    user: str = Depends(verify_token),
+):
+    """شروع deploy"""
+    job_id = str(uuid.uuid4())
+    
+    JOBS[job_id] = {
+        'id': job_id,
+        'type': 'deploy',
+        'version': req.version,
+        'env': req.env,
+        'limit': req.limit,
+        'dry_run': req.dry_run,
+        'user': user,
+        'status': 'running',
+        'submitted_at': datetime.utcnow().isoformat(),
+    }
+    
+    inventory = f'/etc/ansible/inventory/{req.env}'
+    extravars = {
+        'app_version': req.version,
+        'deploy_env': req.env,
+    }
+    
+    background.add_task(
+        execute_job, job_id, 'deploy.yml', inventory,
+        extravars, req.limit, req.dry_run,
+    )
+    
+    return JobResponse(
+        job_id=job_id,
+        status='running',
+        submitted_at=JOBS[job_id]['submitted_at'],
+    )
+
+
+@app.post("/rollback", response_model=JobResponse, status_code=202)
+def rollback(
+    req: RollbackRequest,
+    background: BackgroundTasks,
+    user: str = Depends(verify_token),
+):
+    job_id = str(uuid.uuid4())
+    
+    JOBS[job_id] = {
+        'id': job_id,
+        'type': 'rollback',
+        'env': req.env,
+        'to_version': req.to_version,
+        'user': user,
+        'status': 'running',
+        'submitted_at': datetime.utcnow().isoformat(),
+    }
+    
+    inventory = f'/etc/ansible/inventory/{req.env}'
+    extravars = {
+        'target_version': req.to_version,
+        'env': req.env,
+    }
+    
+    background.add_task(
+        execute_job, job_id, 'rollback.yml', inventory,
+        extravars, 'all', False,
+    )
+    
+    return JobResponse(
+        job_id=job_id,
+        status='running',
+        submitted_at=JOBS[job_id]['submitted_at'],
+    )
+
+
+@app.get("/deploys")
+def list_deploys(user: str = Depends(verify_token)):
+    """لیست jobها"""
+    return {
+        'jobs': sorted(
+            JOBS.values(),
+            key=lambda x: x['submitted_at'],
+            reverse=True,
+        )[:100]
+    }
+
+
+@app.get("/deploys/{job_id}")
+def get_deploy(job_id: str, user: str = Depends(verify_token)):
+    if job_id not in JOBS:
+        raise HTTPException(404, "Job not found")
+    return JOBS[job_id]
+
+
+@app.get("/hosts/{host}/facts")
+def get_host_facts(host: str, user: str = Depends(verify_token)):
+    """گرفتن factهای یک هاست"""
+    r = ansible_runner.run(
+        private_data_dir='/opt/ansible/project',
+        host_pattern=host,
+        module='setup',
+        inventory='/etc/ansible/inventory/production',
+        envvars={'ANSIBLE_STDOUT_CALLBACK': 'json'},
+        quiet=True,
+    )
+    
+    for event in r.events:
+        if event.get('event') == 'runner_on_ok':
+            data = event.get('event_data', {})
+            if data.get('host') == host:
+                return data.get('res', {}).get('ansible_facts', {})
+    
+    raise HTTPException(404, f"Host {host} not found or unreachable")
+
+
+@app.get("/health")
+def health():
+    return {
+        'status': 'ok',
+        'timestamp': datetime.utcnow().isoformat(),
+        'jobs_total': len(JOBS),
+    }
+
+bash
+
+# اجرا
+uvicorn api.main:app --host 0.0.0.0 --port 8000 --workers 4
+
+# استفاده
+curl -X POST http://localhost:8000/deploy \
+  -H "Authorization: Bearer TOKEN_DEPLOY_456" \
+  -H "Content-Type: application/json" \
+  -d '{"version": "1.2.3", "env": "staging", "limit": "webservers"}'
+
+# → {"job_id": "abc...", "status": "running"}
+
+curl http://localhost:8000/deploys/abc...
+
+۱۸️⃣ Celery + Redis (Job Queue برای scale)
+python
+
+# tasks/ansible_tasks.py
+from celery import Celery
+import ansible_runner
+import json
+
+app = Celery('ansible_tasks', broker='redis://redis:6379/0', backend='redis://redis:6379/1')
+app.conf.task_routes = {'deploy.*': {'queue': 'deploy'}}
+app.conf.task_time_limit = 3600
+app.conf.task_soft_time_limit = 3300
+
+
+@app.task(bind=True, max_retries=3)
+def deploy_task(self, host: str, version: str, env: str):
+    """deploy یک هاست"""
+    try:
+        r = ansible_runner.run(
+            private_data_dir='/opt/ansible/project',
+            playbook='deploy.yml',
+            inventory=f'/etc/ansible/inventory/{env}',
+            limit=host,
+            extravars={'app_version': version},
+            envvars={'ANSIBLE_STDOUT_CALLBACK': 'json'},
+            quiet=True,
+        )
+        
+        if r.status == 'successful':
+            return {'host': host, 'status': 'ok', 'rc': 0}
+        
+        # retry با exponential backoff
+        raise self.retry(
+            exc=Exception(f"Deploy failed: {r.status}"),
+            countdown=2 ** self.request.retries * 30,
+        )
+    
+    except Exception as e:
+        return {'host': host, 'status': 'failed', 'error': str(e)}
+
+
+@app.task
+def deploy_all_task(version: str, env: str, hosts: list):
+    """deploy موازی روی همه هاست‌ها"""
+    from celery import group
+    
+    job = group(deploy_task.s(host, version, env) for host in hosts)
+    result = job.apply_async()
+    results = result.get(timeout=3600)
+    
+    failed = [r for r in results if r['status'] != 'ok']
+    return {
+        'total': len(hosts),
+        'succeeded': len(hosts) - len(failed),
+        'failed': failed,
+    }
+
+python
+
+# API integration
+from fastapi import FastAPI
+from tasks.ansible_tasks import deploy_all_task
+
+app = FastAPI()
+
+@app.post("/deploy")
+def deploy(version: str, env: str, hosts: list):
+    task = deploy_all_task.delay(version, env, hosts)
+    return {'task_id': task.id, 'status': 'queued'}
+
+@app.get("/status/{task_id}")
+def status(task_id: str):
+    from tasks.ansible_tasks import app as celery_app
+    result = celery_app.AsyncResult(task_id)
+    return {
+        'id': task_id,
+        'state': result.state,
+        'result': result.result if result.ready() else None,
+    }
+
+مزایا:
+
+    Horizontal scaling (چند worker)
+
+    Retry خودکار
+
+    Monitoring با Flower
+
+    Task persistence در Redis
+
+۱۹️⃣ Webhook Integration (GitHub/GitLab)
+python
+
+# webhooks/github.py
+from fastapi import FastAPI, Request, HTTPException
+import hmac
+import hashlib
+import os
+from tasks.ansible_tasks import deploy_all_task
+
+app = FastAPI()
+WEBHOOK_SECRET = os.environ['GITHUB_WEBHOOK_SECRET']
+
+def verify_signature(payload: bytes, signature: str) -> bool:
+    expected = 'sha256=' + hmac.new(
+        WEBHOOK_SECRET.encode(),
+        payload,
+        hashlib.sha256,
+    ).hexdigest()
+    return hmac.compare_digest(expected, signature)
+
+
+@app.post("/webhook/github")
+async def github_webhook(request: Request):
+    body = await request.body()
+    signature = request.headers.get('X-Hub-Signature-256', '')
+    
+    if not verify_signature(body, signature):
+        raise HTTPException(401, "Invalid signature")
+    
+    payload = await request.json()
+    event = request.headers.get('X-GitHub-Event')
+    
+    # فقط push به tag
+    if event == 'push' and payload.get('ref', '').startswith('refs/tags/v'):
+        version = payload['ref'].replace('refs/tags/', '')
+        
+        # Trigger deploy
+        deploy_all_task.delay(
+            version=version,
+            env='staging',
+            hosts=['web01', 'web02', 'web03'],
+        )
+        
+        return {'status': 'queued', 'version': version}
+    
+    return {'status': 'ignored'}
+
+۲۰️⃣ Parsing Output و Metrics Export
+python
+
+# metrics/exporter.py
+"""
+Prometheus exporter برای نتایج Ansible.
+هر ۵ دقیقه آخرین وضعیت را export می‌کند.
+"""
+from prometheus_client import start_http_server, Gauge, Counter
+import ansible_runner
+import time
+import logging
+
+logger = logging.getLogger(__name__)
+
+HOST_OK = Gauge('ansible_host_ok', 'Host is OK (1/0)', ['host', 'env'])
+HOST_LAST_RUN = Gauge('ansible_host_last_run_timestamp', 'Last run', ['host', 'env'])
+DEPLOY_COUNT = Counter('ansible_deploy_total', 'Deploys', ['status', 'env'])
+
+
+def check_health(env: str, inventory: str):
+    r = ansible_runner.run(
+        private_data_dir='/opt/ansible/project',
+        host_pattern='all',
+        module='ping',
+        inventory=inventory,
+        envvars={'ANSIBLE_STDOUT_CALLBACK': 'json'},
+        quiet=True,
+    )
+    
+    for event in r.events:
+        et = event.get('event')
+        data = event.get('event_data', {})
+        host = data.get('host')
+        
+        if not host:
+            continue
+        
+        if et == 'runner_on_ok':
+            HOST_OK.labels(host=host, env=env).set(1)
+            HOST_LAST_RUN.labels(host=host, env=env).set(time.time())
+        elif et in ('runner_on_failed', 'runner_on_unreachable'):
+            HOST_OK.labels(host=host, env=env).set(0)
+            HOST_LAST_RUN.labels(host=host, env=env).set(time.time())
+
+
+def main():
+    start_http_server(9100)
+    
+    while True:
+        try:
+            check_health('production', '/etc/ansible/inventory/production')
+            check_health('staging', '/etc/ansible/inventory/staging')
+        except Exception as e:
+            logger.error(f"Export failed: {e}")
+        
+        time.sleep(300)
+
+
+if __name__ == '__main__':
+    logging.basicConfig(level=logging.INFO)
+    main()
+
+۲۱️⃣ Testing با pytest-ansible و molecule
+۲۱.۱ تست playbook
+python
+
+# tests/test_playbooks.py
+import pytest
+import ansible_runner
+
+
+@pytest.fixture
+def run_playbook(tmp_path):
+    def _run(playbook: str, inventory: str, extravars=None, check=False):
+        r = ansible_runner.run(
+            private_data_dir='.',
+            playbook=playbook,
+            inventory=inventory,
+            extravars=extravars or {},
+            cmdline='--check' if check else '',
+            quiet=True,
+        )
+        return r
+    return _run
+
+
+def test_deploy_syntax(run_playbook):
+    r = run_playbook('deploy.yml', 'inventory/test', check=True)
+    assert r.rc == 0
+    assert r.status == 'successful'
+
+
+def test_deploy_idempotent(run_playbook):
+    """اجرای دو بار → بار دوم changed=0"""
+    r1 = run_playbook('deploy.yml', 'inventory/test')
+    assert r1.status == 'successful'
+    
+    r2 = run_playbook('deploy.yml', 'inventory/test')
+    assert r2.status == 'successful'
+    
+    stats = {}
+    for event in r2.events:
+        if event.get('event') == 'playbook_on_stats':
+            stats = event['event_data']
+    
+    # changed باید صفر باشد
+    changed = stats.get('changed', {})
+    total_changed = sum(changed.values()) if changed else 0
+    assert total_changed == 0, f"Not idempotent: {changed}"
+
+
+def test_rollback(run_playbook):
+    # deploy
+    run_playbook('deploy.yml', 'inventory/test', {'app_version': '1.0'})
+    
+    # rollback
+    r = run_playbook('rollback.yml', 'inventory/test', {'target_version': '0.9'})
+    assert r.status == 'successful'
+
+۲۱.۲ Molecule test
+python
+
+# molecule/default/tests/test_default.py
+import pytest
+
+
+def test_nginx_running(host):
+    nginx = host.service("nginx")
+    assert nginx.is_running
+    assert nginx.is_enabled
+
+
+def test_nginx_port(host):
+    assert host.socket("tcp://0.0.0.0:80").is_listening
+
+
+def test_config_valid(host):
+    cmd = host.run("nginx -t")
+    assert cmd.rc == 0
+
+
+def test_health_endpoint(host):
+    cmd = host.run("curl -sSf http://localhost/health")
+    assert cmd.rc == 0
+    assert "ok" in cmd.stdout
+
+
+def test_no_world_readable_secrets(host):
+    cmd = host.run("find /etc/app -perm /o+r -type f 2>/dev/null")
+    assert cmd.stdout.strip() == ""
+
+۲۲️⃣ Security Best Practices (Python + Ansible)
+۲۲.۱ هرگز secret در کد
+python
+
+# ❌
+SLACK_TOKEN = "xoxb-1234-5678-abcdef"
+DB_PASSWORD = "SuperSecret123"
+
+# ✅
+import os
+SLACK_TOKEN = os.environ['SLACK_TOKEN']
+DB_PASSWORD = os.environ['DB_PASSWORD']
+
+# ✅ یا از secret manager
+from vault_client import get_secret
+DB_PASSWORD = get_secret('prod/db/password')
+
+# ✅ یا از file با permission
+def read_secret(path: str) -> str:
+    import os, stat
+    st = os.stat(path)
+    if st.st_mode & stat.S_IROTH:
+        raise PermissionError(f"{path} is world-readable!")
+    with open(path) as f:
+        return f.read().strip()
+
+۲۲.۲ Sanitize input
+python
+
+# ❌ command injection
+def deploy(version: str):
+    os.system(f"ansible-playbook deploy.yml -e version={version}")
+    # version = "1.0; rm -rf /" → فاجعه
+
+# ✅ validation
+import re
+
+def validate_version(version: str):
+    if not re.match(r'^v?\d+\.\d+\.\d+(-[a-z0-9]+)?$', version):
+        raise ValueError(f"Invalid version: {version}")
+    return version
+
+# ✅ و ansible_runner (نه subprocess)
+def deploy(version: str):
+    version = validate_version(version)
+    r = ansible_runner.run(
+        ...,
+        extravars={'app_version': version},
+    )
+
+۲۲.۳ Log masking
+python
+
+import logging
+import re
+
+class SecretFilter(logging.Filter):
+    PATTERNS = [
+        (re.compile(r'(password|passwd|pwd)[=:]\s*\S+', re.I), r'\1=***'),
+        (re.compile(r'(token|api[_-]?key)[=:]\s*\S+', re.I), r'\1=***'),
+        (re.compile(r'Bearer\s+[\w\-._~+/]+=*'), 'Bearer ***'),
+        (re.compile(r'AKIA[0-9A-Z]{16}'), 'AKIA***'),  # AWS
+    ]
+    
+    def filter(self, record):
+        msg = record.getMessage()
+        for pattern, replacement in self.PATTERNS:
+            msg = pattern.sub(replacement, msg)
+        record.msg = msg
+        record.args = ()
+        return True
+
+logger = logging.getLogger()
+logger.addFilter(SecretFilter())
+
+۲۲.۴ no_log در extravars
+python
+
+# ❌
+extravars = {
+    'db_password': password,  # در log ansible
+}
+
+# ✅
+r = ansible_runner.run(
+    ...,
+    extravars={'db_password': password},
+    envvars={'ANSIBLE_NOCOLOR': '1'},
+    quiet=True,   # ← مهم
+    # و در playbook: no_log: true
+)
+
+# ✅ یا از env vars
+envvars = {'DB_PASSWORD': password}
+# در playbook:
+# password: "{{ lookup('env', 'DB_PASSWORD') }}"
+
+۲۲.۵ Artifact permission
+python
+
+# هر artifact حاوی sensitive است
+def secure_artifacts(artifact_dir: str):
+    import os
+    for root, dirs, files in os.walk(artifact_dir):
+        os.chmod(root, 0o700)
+        for f in files:
+            os.chmod(os.path.join(root, f), 0o600)
+
+۲۲.۶ Timeout اجباری
+python
+
+# ❌ بدون timeout → hang
+r = ansible_runner.run(...)
+
+# ✅
+r = ansible_runner.run(
+    ...,
+    timeout=1800,   # ۳۰ دقیقه
+    rotate_artifacts=5,
+)
+
+# ✅ و در threadpool
+from concurrent.futures import ThreadPoolExecutor
+with ThreadPoolExecutor(max_workers=5) as ex:
+    future = ex.submit(run_playbook, ...)
+    try:
+        result = future.result(timeout=1900)
+    except TimeoutError:
+        logger.error("Playbook timeout")
+
+۲۲.۷ Rate limiting
+python
+
+from functools import wraps
+import time
+
+def rate_limit(max_calls: int, period: int):
+    calls = []
+    def decorator(fn):
+        @wraps(fn)
+        def wrapper(*args, **kwargs):
+            now = time.time()
+            calls[:] = [c for c in calls if c > now - period]
+            if len(calls) >= max_calls:
+                sleep_for = period - (now - calls[0])
+                time.sleep(sleep_for)
+            calls.append(time.time())
+            return fn(*args, **kwargs)
+        return wrapper
+    return decorator
+
+
+@rate_limit(max_calls=10, period=60)   # 10 در دقیقه
+def deploy(host: str):
+    return ansible_runner.run(...)
+
+۲۲.۸ Validation قبل از اجرا
+python
+
+def preflight_checks(playbook: str, inventory: str) -> bool:
+    """بررسی‌های اولیه قبل از اجرای واقعی"""
+    # 1. syntax check
+    r = ansible_runner.run(
+        private_data_dir='.',
+        playbook=playbook,
+        cmdline='--syntax-check',
+        quiet=True,
+    )
+    if r.rc != 0:
+        raise ValueError(f"Syntax error in {playbook}")
+    
+    # 2. inventory exists
+    import os
+    if not os.path.exists(inventory):
+        raise FileNotFoundError(f"Inventory not found: {inventory}")
+    
+    # 3. run --check
+    r = ansible_runner.run(
+        private_data_dir='.',
+        playbook=playbook,
+        inventory=inventory,
+        cmdline='--check --diff',
+        quiet=True,
+    )
+    if r.rc != 0:
+        raise ValueError(f"Check mode failed: {r.rc}")
+    
+    return True
+
+۲۲.۹ Run as non-root
+python
+
+# /etc/systemd/system/ansible-api.service
+[Service]
+User=ansible
+Group=ansible
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/ansible /var/log/ansible
+PrivateTmp=yes
+PrivateDevices=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallFilter=@system-service
+
+📊 جدول خلاصه: کدهای روزانه vs هفتگی
+تناوب	اسکریپت	کاربرد	Trigger
+روزانه ۸:۰۰	health_check.py	بررسی سلامت همه	cron
+روزانه per push	deploy.py	Canary + Rolling	Git webhook
+روزانه on-call	rollback.py	بازگشت	Manual / auto
+روزانه on-incident	incident.py	Isolate + Forensic	SIEM alert
+هفتگی دوشنبه ۶:۰۰	compliance_audit.py	CIS audit	cron
+هفتگی دوشنبه ۸:۰۰	capacity_report.py	Trends	cron
+هفتگی سه‌شنبه ۲:۰۰	patch_management.py	Security patches	cron + window
+هفتگی پنجشنبه ۱۰:۰۰	cost_optimization.py	AWS cost	cron
+هر ۵ دقیقه	exporter.py	Prometheus metrics	daemon
+On webhook	webhooks/github.py	Git trigger	GitHub
+On HTTP	api/main.py	REST API	Users/CI
+Job queue	tasks/ansible_tasks.py	Scale	Celery
+🎓 ۱۰ قانون طلایی Python + Ansible
+
+    هرگز subprocess به‌جای ansible_runner — injection و parse مشکل
+
+    هرگز secret در کد — env vars یا secret manager
+
+    همیشه timeout — playbook hang می‌شود
+
+    همیشه quiet=True در API/queue
+
+    همیشه no_log در playbook برای حساس
+
+    همیشه input validation (re.match, pydantic)
+
+    همیشه log masking (SecretFilter)
+
+    همیشه artifact permission (700)
+
+    همیشه rate limiting برای API عمومی
+
+    همیشه preflight (--syntax-check + --check)

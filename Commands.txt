@@ -1,0 +1,1110 @@
+﻿🌳 راهنمای جامع و درخت‌وار تمام دستورات Ansible + توضیحات فنی و مثال
+
+    هر دستور با فرمت: کارکرد → سینتکس → آرگومان‌های کلیدی → مثال‌های عملی
+
+📚 درخت کلی دستورات
+text
+
+Ansible CLI Tools
+│
+├── ansible                    ← Ad-hoc commands (اجرای تک‌دستور)
+├── ansible-playbook           ← اجرای Playbook
+├── ansible-galaxy             ← مدیریت Role/Collection
+├── ansible-vault              ← رمزنگاری فایل‌های حساس
+├── ansible-config             ← مدیریت کانفیگ
+├── ansible-doc                ← مستندات ماژول/پلاگین
+├── ansible-inventory          ← مدیریت و بازرسی Inventory
+├── ansible-console            ← REPL تعاملی
+├── ansible-pull               ← Pull-mode (میزبان‌ها خودشان را config می‌کنند)
+├── ansible-connection         ← اتصال پایدار (network_cli)
+├── ansible-test               ← تست (بیشتر برای توسعه‌دهنده‌ها)
+├── ansible-builder            ← ساخت Execution Environment
+├── ansible-navigator          ← TUI جدید برای اجرا
+├── ansible-runner             ← اجرای برنامه‌نویسی‌شده (Python/API)
+├── ansible-lint               ← Linter (پکیج جدا)
+└── ansible-lint               
+
+1️⃣ ansible — Ad-hoc Commands
+کارکرد
+
+اجرای یک ماژول روی یک یا چند هاست بدون نوشتن playbook. مناسب برای کارهای سریع یک‌بارمصرف.
+سینتکس
+bash
+
+ansible <pattern> [-m MODULE] [-a "ARGS"] [options]
+
+گزینه‌های کلیدی
+گزینه	توضیح
+-m, --module-name	ماژول (پیش‌فرض: command)
+-a, --args	آرگومان‌های ماژول به‌صورت key=value یا JSON
+-i, --inventory	مسیر inventory
+-u, --user	کاربر SSH
+-b, --become	فعال‌سازی privilege escalation
+-K, --ask-become-pass	پرسیدن رمز sudo
+-k, --ask-pass	پرسیدن رمز SSH
+-l, --limit	محدود کردن به زیرمجموعه‌ای
+-f, --forks	تعداد موازی (پیش‌فرض 5)
+-e, --extra-vars	متغیرهای اضافی
+-T, --timeout	timeout اتصال
+-B, --background	async timeout
+-P, --poll	poll interval (پیش‌فرض 15)
+-C, --check	dry-run
+-D, --diff	نمایش تفاوت
+-v/-vv/-vvv/-vvvv	سطح verbose
+--private-key	کلید SSH
+--list-hosts	فقط لیست هاست‌ها
+--tree	ذخیره خروجی در دایرکتوری
+--syntax-check	بررسی سینتکس
+--step	تأیید هر task
+--start-at-task	شروع از یک task
+--ssh-common-args	آرگومان‌های SSH
+--ssh-extra-args	
+-o, --one-line	خروجی تک‌خطی
+-t, --tree	
+مثال‌های عملی
+پینگ همه هاست‌ها
+bash
+
+ansible all -m ping
+ansible all -i inventory -m ping -u deploy --private-key ~/.ssh/id_rsa
+
+بررسی uptime
+bash
+
+ansible webservers -m command -a "uptime"
+ansible all -a "uptime" -o   # خروجی یک‌خطی
+
+نصب پکیج با privilege escalation
+bash
+
+ansible all -b -m apt -a "name=htop state=present"
+ansible all -b -K -m yum -a "name=httpd state=latest"
+
+کپی فایل
+bash
+
+ansible all -m copy -a "src=/tmp/config dest=/etc/app/config mode=0644 owner=root"
+
+اجرای shell command
+bash
+
+ansible all -m shell -a "ps aux | grep nginx"
+ansible all -m command -a "/usr/bin/systemctl status nginx"
+
+مدیریت سرویس
+bash
+
+ansible all -b -m service -a "name=nginx state=restarted"
+ansible all -b -m systemd -a "name=nginx state=started enabled=yes"
+
+Fact gathering
+bash
+
+ansible host -m setup
+ansible host -m setup -a "filter=ansible_*ipv4*"
+ansible host -m setup -a "gather_subset=network"
+
+با محدودیت
+bash
+
+ansible all -l web01 -m ping
+ansible webservers -l "web01:web02" -m ping
+
+با متغیر
+bash
+
+ansible all -e "target=/opt/myapp" -m file -a "path={{ target }} state=directory"
+
+async (کارهای طولانی)
+bash
+
+ansible all -B 3600 -P 0 -m command -a "/usr/local/bin/backup.sh"
+ansible all -B 3600 -P 0 -m command -a "long-task" -o
+
+با SSH tunnel / bastion
+bash
+
+ansible all --ssh-common-args='-o ProxyJump=bastion.example.com' -m ping
+
+بررسی اتصال با verbose
+bash
+
+ansible all -m ping -vvv
+
+دانلود فایل
+bash
+
+ansible all -m fetch -a "src=/var/log/syslog dest=/tmp/logs/ flat=no"
+
+اجرای اسکریپت
+bash
+
+ansible all -m script -a "/tmp/setup.sh arg1"
+
+2️⃣ ansible-playbook — اجرای Playbook
+کارکرد
+
+اجرای فایل YAML حاوی play/task/role.
+سینتکس
+bash
+
+ansible-playbook <playbook.yml> [options]
+
+گزینه‌های کلیدی
+گزینه	توضیح
+-i, --inventory	inventory
+-l, --limit	محدود کردن هاست‌ها
+-e, --extra-vars	متغیرها
+--extra-vars @file.yml	متغیرها از فایل
+--vault-password-file	رمز vault
+--ask-vault-pass	پرسیدن رمز
+--vault-id	id:source
+-C, --check	dry-run
+-D, --diff	نمایش تفاوت
+--syntax-check	بررسی سینتکس
+--list-tasks	لیست taskها
+--list-tags	لیست tagها
+--list-hosts	لیست هاست‌ها
+--start-at-task	شروع از task مشخص
+--step	تأیید هر task
+-t, --tags	اجرای tagهای مشخص
+--skip-tags	نادیده گرفتن tagها
+-f, --forks	موازی
+--flush-cache	پاک کردن fact cache
+--force-handlers	اجرای handlerها حتی در fail
+--force-color	رنگ اجباری
+-b, --become	privilege escalation
+-K	پرسیدن رمز sudo
+--timeout	SSH timeout
+--check + --diff	ترکیب برای audit
+--private-key	کلید
+--limit	
+--inventory-file	منسوخ
+-v	verbose (تا ۴ بار)
+--notify	(نادر)
+--list-tasks	
+--connection	نوع اتصال
+--module-path	مسیر ماژول‌های اضافی
+--start-at-task	
+--force-color	
+--list-tags	
+--skip-tags	
+مثال‌های عملی
+اجرای ساده
+bash
+
+ansible-playbook site.yml
+ansible-playbook -i inventory/prod site.yml
+
+با متغیر
+bash
+
+ansible-playbook site.yml -e "version=1.2.3"
+ansible-playbook site.yml -e @vars/prod.yml
+ansible-playbook site.yml -e '{"version": "1.2.3", "env": "prod"}'
+
+Dry-run + diff
+bash
+
+ansible-playbook site.yml --check --diff
+
+بررسی سینتکس
+bash
+
+ansible-playbook site.yml --syntax-check
+
+لیست
+bash
+
+ansible-playbook site.yml --list-tasks
+ansible-playbook site.yml --list-hosts
+ansible-playbook site.yml --list-tags
+
+اجرای tag
+bash
+
+ansible-playbook site.yml --tags "deploy,restart"
+ansible-playbook site.yml --tags "install"
+ansible-playbook site.yml --skip-tags "test,debug"
+
+شروع از task
+bash
+
+ansible-playbook site.yml --start-at-task "Deploy artifact"
+
+تأیید مرحله‌ای (بی‌نهایت مفید در prod)
+bash
+
+ansible-playbook site.yml --step
+
+محدود به زیرمجموعه
+bash
+
+ansible-playbook site.yml --limit "web01:web02"
+ansible-playbook site.yml --limit "webservers:&prod"
+ansible-playbook site.yml --limit "@retry_hosts.txt"
+
+با vault
+bash
+
+ansible-playbook site.yml --ask-vault-pass
+ansible-playbook site.yml --vault-password-file=~/.vault_pass
+ansible-playbook site.yml --vault-id prod@vault-client.py
+ansible-playbook site.yml --vault-id dev@prompt --vault-id prod@vault-prod.sh
+
+با become
+bash
+
+ansible-playbook site.yml -b -K
+
+با verbose
+bash
+
+ansible-playbook site.yml -vvv
+ansible-playbook site.yml -vvvv --start-at-task "failing task"
+
+با callback
+bash
+
+ANSIBLE_STDOUT_CALLBACK=json ansible-playbook site.yml
+ANSIBLE_STDOUT_CALLBACK=yaml ansible-playbook site.yml
+
+retry
+bash
+
+ansible-playbook site.yml
+# پس از شکست، فایل .retry ساخته می‌شود
+ansible-playbook site.yml --limit @site.retry
+
+دیباگ حفظ فایل‌های remote
+bash
+
+ANSIBLE_KEEP_REMOTE_FILES=1 ansible-playbook site.yml -vvv
+
+اجرای playbook از URL
+bash
+
+ansible-playbook https://example.com/playbook.yml
+
+با fork محدود
+bash
+
+ansible-playbook site.yml -f 10
+
+3️⃣ ansible-galaxy — مدیریت Role و Collection
+زیردستورها
+text
+
+ansible-galaxy
+├── role
+│   ├── init       ← ساخت اسکلت role جدید
+│   ├── install    ← نصب role
+│   ├── remove     ← حذف
+│   ├── list       ← لیست نصب‌شده‌ها
+│   ├── info       ← اطلاعات role
+│   ├── search     ← جستجو در Galaxy
+│   ├── login      ← ورود به Galaxy
+│   └── import     ← آپلود به Galaxy
+│
+└── collection
+    ├── init       ← ساخت اسکلت collection
+    ├── install    ← نصب collection
+    ├── list       ← لیست
+    ├── verify     ← بررسی امضا
+    ├── download   ← دانلود tarball
+    ├── build      ← ساخت tarball
+    ├── publish    ← آپلود
+    └── upgrade    ← ارتقاء
+
+مثال‌های عملی
+Role init
+bash
+
+ansible-galaxy role init myrole
+ansible-galaxy role init --init-path roles/ myrole
+
+Role install
+bash
+
+ansible-galaxy role install geerlingguy.nginx
+ansible-galaxy role install geerlingguy.nginx,1.2.3
+ansible-galaxy role install -r requirements.yml
+ansible-galaxy role install -r requirements.yml -p roles/
+ansible-galaxy role install --force geerlingguy.nginx
+
+requirements.yml نمونه
+yaml
+
+roles:
+  - name: geerlingguy.nginx
+    version: 3.1.4
+  - name: geerlingguy.mysql
+    src: https://github.com/geerlingguy/ansible-role-mysql
+    scm: git
+    version: master
+  - src: https://github.com/org/role.tar.gz
+    name: myrole
+
+Role list
+bash
+
+ansible-galaxy role list
+ansible-galaxy role list -p roles/
+
+Role info
+bash
+
+ansible-galaxy role info geerlingguy.nginx
+
+Role search
+bash
+
+ansible-galaxy role search nginx
+ansible-galaxy role search --author geerlingguy nginx
+
+Role remove
+bash
+
+ansible-galaxy role remove geerlingguy.nginx
+
+Collection install
+bash
+
+ansible-galaxy collection install community.general
+ansible-galaxy collection install amazon.aws:6.5.0
+ansible-galaxy collection install -r collections/requirements.yml
+ansible-galaxy collection install -r requirements.yml -p ./collections
+ansible-galaxy collection install --pre community.general
+ansible-galaxy collection install --force-with-deps community.general
+
+collections/requirements.yml نمونه
+yaml
+
+collections:
+  - name: community.general
+    version: ">=7.0.0,<8.0.0"
+  - name: amazon.aws
+    version: "==6.5.0"
+  - name: https://github.com/org/collection.tar.gz
+    type: url
+  - source: https://galaxy.ansible.com
+    name: kubernetes.core
+
+Collection list
+bash
+
+ansible-galaxy collection list
+ansible-galaxy collection list community.general
+ansible-galaxy collection list --format json
+
+Collection build/publish
+bash
+
+ansible-galaxy collection build
+ansible-galaxy collection publish mynamespace-mycollection-1.0.0.tar.gz
+
+Collection verify (امضای GPG)
+bash
+
+ansible-galaxy collection verify community.general
+ansible-galaxy collection verify --keyring ~/.gnupg/pubring.kbx community.general
+
+Collection init
+bash
+
+ansible-galaxy collection init mynamespace.mycollection
+
+4️⃣ ansible-vault — رمزنگاری
+زیردستورها
+text
+
+ansible-vault
+├── create     ← ساخت فایل رمزنگاری‌شده جدید
+├── encrypt    ← رمز کردن فایل موجود
+├── decrypt    ← رمزگشایی
+├── edit       ← ویرایش رمز
+├── view       ← مشاهده بدون ذخیره رمزگشایی
+├── rekey      ← تغییر رمز
+└── encrypt_string  ← رمز کردن رشته (inline)
+
+مثال‌های عملی
+create
+bash
+
+ansible-vault create secrets.yml
+ansible-vault create --vault-id prod@prompt secrets-prod.yml
+ansible-vault create --vault-password-file ~/.vault_pass secrets.yml
+
+encrypt
+bash
+
+ansible-vault encrypt secrets.yml
+ansible-vault encrypt --output secrets.enc.yml secrets.yml
+ansible-vault encrypt --vault-id prod@prompt file.yml
+ansible-vault encrypt_string 'mysecret' --name 'db_password'
+
+encrypt_string
+bash
+
+# خروجی inline قابل paste در vars
+ansible-vault encrypt_string 'SuperSecret123' --name 'db_password'
+# خروجی:
+# db_password: !vault |
+#   $ANSIBLE_VAULT;1.1;AES256
+#   616263...
+
+# با vault-id
+ansible-vault encrypt_string --vault-id prod@prompt 'secret' --name 'api_key'
+
+decrypt
+bash
+
+ansible-vault decrypt secrets.yml
+ansible-vault decrypt --output secrets.plain.yml secrets.yml
+
+edit
+bash
+
+ansible-vault edit secrets.yml
+ansible-vault edit --vault-id prod@prompt secrets-prod.yml
+
+view
+bash
+
+ansible-vault view secrets.yml
+ansible-vault view --vault-password-file ~/.vault_pass secrets.yml
+
+rekey
+bash
+
+ansible-vault rekey secrets.yml
+ansible-vault rekey --new-vault-password-file=new_pass.txt secrets.yml
+ansible-vault rekey --vault-id dev@old --new-vault-id prod@new secrets.yml
+ansible-vault rekey --new-vault-id prod@prompt secrets.yml
+
+5️⃣ ansible-config — مدیریت کانفیگ
+زیردستورها
+text
+
+ansible-config
+├── list       ← لیست همه تنظیمات با توضیح
+├── dump       ← نمایش کانفیگ مؤثر
+├── view       ← نمایش فایل ansible.cfg مؤثر
+└── init       ← تولید ansible.cfg نمونه
+
+مثال‌های عملی
+dump
+bash
+
+ansible-config dump
+ansible-config dump --only-changed
+ansible-config dump --only-changed -t all
+ansible-config dump | grep -i ssh_
+
+view
+bash
+
+ansible-config view
+
+list
+bash
+
+ansible-config list
+ansible-config list | less
+ansible-config list | grep -A5 'DEFAULT_HOST_LIST'
+
+init
+bash
+
+ansible-config init --disabled > ansible.cfg
+ansible-config init --disabled --type all > ansible.cfg
+ansible-config init --disabled -t all > ansible.cfg
+
+6️⃣ ansible-doc — مستندات
+کارکرد
+
+مشاهده مستندات ماژول/plugin.
+زیردستورها
+text
+
+ansible-doc
+├── -l           ← لیست همه ماژول‌ها
+├── -F           ← لیست با FQCN
+├── -s <module>  ← snippet نمونه
+└── <module>     ← مستندات کامل
+
+مثال‌ها
+bash
+
+ansible-doc -l
+ansible-doc -l | grep user
+ansible-doc -F | grep -i copy
+ansible-doc copy
+ansible-doc -s copy
+ansible-doc ansible.builtin.copy
+ansible-doc community.general.htpasswd
+ansible-doc -t lookup file
+ansible-doc -t filter ipaddr
+ansible-doc -t connection ssh
+ansible-doc -t inventory aws_ec2
+ansible-doc -t callback profile_tasks
+ansible-doc -t become sudo
+ansible-doc -t strategy linear
+ansible-doc -t cache jsonfile
+
+7️⃣ ansible-inventory — Inventory
+کارکرد
+
+بازرسی و دیباگ inventory.
+مثال‌ها
+نمایش کامل
+bash
+
+ansible-inventory -i inventory --list
+ansible-inventory -i inventory/prod --list
+ansible-inventory --list --yaml
+ansible-inventory -i hosts.yml --list --output inventory.json
+
+درخت
+bash
+
+ansible-inventory -i inventory --graph
+ansible-inventory -i inventory --graph --vars
+ansible-inventory -i inventory --graph webservers
+
+هاست خاص
+bash
+
+ansible-inventory -i inventory --host web01
+ansible-inventory -i inventory --host web01 --yaml
+
+دیباگ
+bash
+
+ansible-inventory -i inventory --list -vvv
+ansible-inventory -i inventory_aws.yml --graph -vvv
+
+export به فایل
+bash
+
+ansible-inventory -i inventory --list --output=/tmp/inv.json
+ansible-inventory -i inventory --list --toml
+ansible-inventory -i inventory --list --yaml --output=inv.yml
+
+import (reverse)
+bash
+
+ansible-inventory -i inventory --list | ansible-inventory -i - --list
+
+8️⃣ ansible-console — REPL تعاملی
+کارکرد
+
+پوسته تعاملی برای اجرای ماژول‌ها روی هاست‌های انتخاب‌شده.
+مثال
+bash
+
+ansible-console
+ansible-console -i inventory all
+ansible-console -i inventory -u deploy webservers
+ansible-console -i inventory -b all
+
+داخل کنسول
+text
+
+webservers (5)[f:5]$ ping
+webservers (5)[f:5]$ command uptime
+webservers (5)[f:5]$ cd web01
+web01 (1)[f:5]$ setup
+web01 (1)[f:5]$ become true
+web01 (1)[f:5]$ help
+web01 (1)[f:5]$ forks 10
+web01 (1)[f:5]$ exit
+
+9️⃣ ansible-pull — Pull Mode
+کارکرد
+
+هاست‌ها خودشان playbook را از git می‌کشند و روی خودشان اجرا می‌کنند (برعکس push mode).
+مثال‌ها
+pull پایه
+bash
+
+ansible-pull -U https://github.com/org/repo.git playbook.yml
+
+با checkout branch
+bash
+
+ansible-pull -U https://github.com/org/repo.git -C production site.yml
+
+با inventory و limit
+bash
+
+ansible-pull -U https://github.com/org/repo.git \
+  -i localhost, \
+  -l localhost \
+  -d /var/lib/ansible/local \
+  site.yml
+
+بدون git (local)
+bash
+
+ansible-pull -U file:///srv/playbooks playbook.yml
+
+زمان‌بندی با cron
+bash
+
+# /etc/cron.d/ansible-pull
+*/15 * * * * root /usr/bin/ansible-pull \
+  -U https://github.com/org/repo.git \
+  -C production \
+  -i /etc/ansible/hosts \
+  -o \
+  /var/lib/ansible/local \
+  site.yml >> /var/log/ansible-pull.log 2>&1
+
+گزینه‌های مهم:
+
+    -U: URL مخزن
+
+    -C: branch
+
+    -d: دایرکتوری clone
+
+    -o: --only-if-changed (فقط اگر repo تغییر کرده)
+
+    -i: inventory
+
+    -s: sleep بین اجرا
+
+    --accept-host-key
+
+🔟 ansible-connection — Persistent Connection
+کارکرد
+
+سرویس کمکی برای اتصال‌های پایدار (network_cli، netconf). معمولاً خودکار اجرا می‌شود.
+مثال (نادر استفاده مستقیم)
+bash
+
+ansible-connection -h
+
+پاک‌سازی سوکت‌های گیرکرده
+bash
+
+ls ~/.ansible/pc/
+pkill ansible-connection
+rm -rf ~/.ansible/pc/*
+
+1️⃣1️⃣ ansible-test — تست (توسعه‌دهنده)
+کارکرد
+
+ابزار تست Ansible core و collectionها.
+مثال‌ها
+bash
+
+ansible-test sanity
+ansible-test units
+ansible-test integration
+ansible-test sanity --python 3.10
+ansible-test integration --docker ubuntu2204
+ansible-test coverage
+ansible-test shell --docker
+
+1️⃣2️⃣ ansible-builder — ساخت Execution Environment
+کارکرد
+
+ساخت image container (EE) برای Ansible.
+زیردستورها
+text
+
+ansible-builder
+├── build
+└── create
+
+مثال‌ها
+create (نمونه)
+bash
+
+ansible-builder create
+
+build
+bash
+
+ansible-builder build -t my-ee:latest -f execution-environment.yml
+ansible-builder build -t my-ee:1.0 --context ./context/
+ansible-builder build --container-runtime podman -t my-ee:latest
+
+execution-environment.yml نمونه
+yaml
+
+version: 3
+images:
+  base_image:
+    name: quay.io/ansible/creator-ee:latest
+dependencies:
+  ansible_core:
+    package_pip: ansible-core>=2.14
+  ansible_runner:
+    package_pip: ansible-runner
+  galaxy:
+    collections:
+      - community.general
+      - amazon.aws
+  python:
+    - boto3
+  system:
+    - git
+    - sshpass
+
+1️⃣3️⃣ ansible-navigator — TUI مدرن
+کارکرد
+
+جایگزین interactive ansible-playbook با TUI + EE.
+زیردستورها
+text
+
+ansible-navigator
+├── run        ← اجرای playbook
+├── collections
+├── config
+├── doc        ← مستندات
+├── exec       ← exec در EE
+├── images
+├── inventory
+├── replay     ← بازپخش اجرای قبلی
+├── settings
+└── wizard
+
+مثال‌ها
+run
+bash
+
+ansible-navigator run site.yml
+ansible-navigator run site.yml -m stdout
+ansible-navigator run site.yml --ee false
+ansible-navigator run -i inventory site.yml --limit web01
+ansible-navigator run site.yml --mode stdout
+ansible-navigator run site.yml --pp never
+
+replay
+bash
+
+ansible-navigator replay <artifacts-dir>
+
+inventory
+bash
+
+ansible-navigator inventory -i inventory --list
+ansible-navigator inventory -i inventory --host web01
+
+doc
+bash
+
+ansible-navigator doc copy
+ansible-navigator doc copy -m stdout
+
+config
+bash
+
+ansible-navigator config
+ansible-navigator config dump
+
+collections
+bash
+
+ansible-navigator collections
+
+wizard
+bash
+
+ansible-navigator wizard
+
+1️⃣4️⃣ ansible-runner — Python API/CLI
+کارکرد
+
+اجرای Ansible به‌صورت برنامه‌نویسی‌شده (Python library + CLI).
+مثال‌ها
+CLI
+bash
+
+ansible-runner run /path/to/project -p playbook.yml
+ansible-runner run /path/to/project -p site.yml -i inventory
+ansible-runner run . -p playbook.yml --cmdline "-vvv"
+
+Python API
+python
+
+import ansible_runner
+
+r = ansible_runner.run(
+    private_data_dir='/path/to/project',
+    playbook='site.yml',
+    inventory='inventory',
+    extravars={'env': 'prod'},
+    limit='webservers',
+)
+print(f"{r.status}: {r.rc}")
+for event in r.events:
+    print(event.get('event'))
+
+با callbacks
+python
+
+def my_handler(event):
+    print(event.get('event'), event.get('task'))
+
+r = ansible_runner.run(
+    private_data_dir='.',
+    playbook='site.yml',
+    event_handler=my_handler,
+)
+
+1️⃣5️⃣ ansible-lint — Linter (پکیج جدا)
+کارکرد
+
+بررسی بهترین شیوه‌ها و خطاهای playbook.
+مثال‌ها
+bash
+
+ansible-lint
+ansible-lint site.yml
+ansible-lint roles/
+ansible-lint --profile production
+ansible-lint --profile min
+ansible-lint -x yaml
+ansible-lint -x "yaml[line-length],no-changed-when"
+ansible-lint -f pep8 site.yml
+ansible-lint -f json > lint.json
+ansible-lint -f sarif > lint.sarif
+ansible-lint --fix site.yml
+ansible-lint --offline
+ansible-lint -p site.yml
+
+.ansible-lint نمونه
+yaml
+
+profile: production
+exclude_paths:
+  - .cache/
+  - .git/
+  - roles/vendor/
+enable_list:
+  - no-changed-when
+  - no-same-owner
+skip_list:
+  - yaml[line-length]
+  - no-handler
+warn_list:
+  - experimental
+  - jinja[spacing]
+write_list:
+  - command-instead-of-module
+
+1️⃣6️⃣ ansible-pull — جزئیات بیشتر
+
+(قبلاً توضیح داده شد)
+گزینه‌های کلیدی
+bash
+
+-C, --checkout BRANCH
+-d, --directory DEST
+-U, --url URL
+-s, --sleep N
+-o, --only-if-changed
+-i, --inventory
+-l, --limit
+-f, --force
+-A, --accept-host-key
+
+🔗 دستورات جفت‌شده و مکمل
+ansible-config + ansible-playbook
+bash
+
+ansible-config dump --only-changed
+ansible-playbook site.yml
+
+ansible-galaxy + ansible-playbook
+bash
+
+ansible-galaxy collection install -r requirements.yml
+ansible-playbook site.yml
+
+ansible-vault + ansible-playbook
+bash
+
+ansible-vault encrypt secrets.yml
+ansible-playbook site.yml --vault-password-file ~/.vault_pass
+
+ansible-inventory + ansible
+bash
+
+ansible-inventory -i inventory --graph
+ansible webservers -i inventory -m ping
+
+📊 جدول مقایسه سریع
+دستور	کاربرد اصلی	محیط
+ansible	ad-hoc	ops سریع
+ansible-playbook	اجرای playbook	همیشه
+ansible-galaxy	نصب role/coll	bootstrap
+ansible-vault	secrets	security
+ansible-config	کانفیگ	debug
+ansible-doc	مستندات	یادگیری
+ansible-inventory	inventory	debug
+ansible-console	REPL	exploratory
+ansible-pull	pull-mode	scale
+ansible-navigator	TUI + EE	مدرن
+ansible-runner	API	integration
+ansible-builder	ساخت EE	packaging
+ansible-lint	lint	CI/CD
+🎯 مثال‌های ترکیبی کاربردی
+چرخه کامل یک deploy
+bash
+
+# 1. نصب وابستگی‌ها
+ansible-galaxy collection install -r requirements.yml
+ansible-galaxy role install -r roles/requirements.yml -p roles/
+
+# 2. رمزگشایی
+ansible-vault view --vault-password-file ~/.vault_pass group_vars/prod/vault.yml
+
+# 3. بررسی
+ansible-playbook site.yml --syntax-check
+ansible-playbook site.yml --check --diff --limit staging
+
+# 4. اجرا
+ansible-playbook site.yml -e @vars/prod.yml --vault-password-file ~/.vault_pass
+
+# 5. اجرا روی failed فقط
+ansible-playbook site.yml --limit @site.retry
+
+# 6. بررسی نتیجه
+ansible all -i inventory/prod -m shell -a "systemctl is-active nginx"
+
+چرخه یک Incident
+bash
+
+# دیباگ اتصال
+ansible all -i inventory -m ping -vvv
+
+# فکت‌ها
+ansible web01 -i inventory -m setup -a "filter=ansible_*mem*"
+
+# لاگ
+ansible web01 -i inventory -m shell -a "journalctl -u nginx --since '10 min ago'"
+
+# کانفیگ
+ansible-config dump --only-changed
+
+# inventory
+ansible-inventory -i inventory --host web01
+
+چرخه CI/CD
+bash
+
+# 1. lint
+ansible-lint --profile production
+
+# 2. syntax
+ansible-playbook --syntax-check site.yml
+
+# 3. check
+ansible-playbook --check --diff -i inventory/staging site.yml
+
+# 4. deploy
+ansible-playbook -i inventory/prod site.yml \
+  --vault-password-file=vault-client.py \
+  -e "env=prod version=${CI_COMMIT_SHA}"
+
+# 5. verify
+ansible-playbook -i inventory/prod smoke-test.yml
+
+⚙️ متغیرهای محیطی مؤثر روی همه دستورات
+bash
+
+export ANSIBLE_CONFIG=/etc/ansible/ansible.cfg
+export ANSIBLE_INVENTORY=/etc/ansible/hosts
+export ANSIBLE_VAULT_PASSWORD_FILE=/etc/ansible/.vault_pass
+export ANSIBLE_REMOTE_USER=deploy
+export ANSIBLE_PRIVATE_KEY_FILE=/etc/ansible/keys/deploy_ed25519
+export ANSIBLE_HOST_KEY_CHECKING=True
+export ANSIBLE_STDOUT_CALLBACK=yaml
+export ANSIBLE_LOG_PATH=/var/log/ansible.log
+export ANSIBLE_FORKS=20
+export ANSIBLE_TIMEOUT=30
+export ANSIBLE_PIPELINING=True
+export ANSIBLE_SSH_ARGS="-o ControlMaster=auto -o ControlPersist=300s"
+export ANSIBLE_NOCOLOR=1
+export ANSIBLE_COLLECTIONS_PATH=/etc/ansible/collections
+export ANSIBLE_ROLES_PATH=/etc/ansible/roles
+
+🧪 Playbook عیب‌یابی جامع (diagnostic playbook نمونه)
+yaml
+
+---
+- name: comprehensive diagnostics
+  hosts: all
+  gather_facts: yes
+  tasks:
+    - name: basic info
+      debug:
+        msg:
+          - "hostname: {{ ansible_hostname }}"
+          - "fqdn: {{ ansible_fqdn }}"
+          - "os: {{ ansible_distribution }} {{ ansible_distribution_version }}"
+          - "kernel: {{ ansible_kernel }}"
+          - "python: {{ ansible_python_version }}"
+
+    - name: connectivity
+      uri:
+        url: https://www.google.com
+        timeout: 5
+      register: net
+      ignore_errors: yes
+
+    - name: services state
+      service_facts:
+
+    - name: disks
+      debug:
+        var: ansible_mounts
+
+    - name: listeners
+      shell: ss -tlnp
+      changed_when: false
+
+    - name: top processes
+      shell: ps aux --sort=-%mem | head -10
+      changed_when: false
+
+اجرا:
+bash
+
+ansible-playbook diagnostics.yml -i inventory -l web01
+
+🎓 جمع‌بندی و الگوی ذهنی
+الگوی یادگیری
+
+    ansible → یاد بگیر با ad-hoc
+
+    ansible-playbook → playbook بنویس
+
+    ansible-galaxy → از role/coll استفاده کن
+
+    ansible-vault → secrets مدیریت کن
+
+    ansible-config/ansible-doc → debug/کشف
+
+    ansible-lint/ansible-test → استاندارد
+
+    ansible-navigator/ansible-builder → مدرن production
+
+دستورهای روزانه DevOps
+bash
+
+ansible all -m ping -i inv                                    # health check
+ansible-playbook site.yml --check --diff                      # audit
+ansible-playbook site.yml --limit staging -e @vars/stg.yml    # deploy staging
+ansible-inventory -i inv --graph                              # topology
+ansible-doc <module>                                          # help
+ansible-vault edit secrets.yml                                # secrets
+ansible-galaxy collection install -r requirements.yml         # deps
+ansible-config dump --only-changed                            # config debug
+
